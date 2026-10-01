@@ -86,18 +86,16 @@ OS가 하나도 없는 빈 디스크만 만들어집니다.
 
 ## R\* 앱 설치
 
-```sh
-cd renku-repo/arm64 && python3 -m http.server 8641   # 호스트에서, 한 번만
-```
-
-그 다음 게스트 안(Terminal)에서:
+게스트 안(Terminal)에서:
 
 ```sh
-pkgman add-repo http://10.0.2.2:8641
+pkgman add-repo https://pkgman.rainygirl.com/arm64
 pkgman install -y rmemo rtiler rmarkdown rsoundeditor rworldradio rqrreader rtemperature
 ```
 
-`10.0.2.2`는 QEMU 네트워크 너머로 보이는 호스트 Mac입니다.
+이 저장소엔 위에서 설치한 것 말고도 R\* 앱이 더 있습니다(`rchromium`,
+`rtwitter`, `rspectrum` 등) -- 게스트 안에서 `pkgman search`로 지금
+올라와 있는 전체 목록을 볼 수 있습니다.
 
 ## 알려진 한계
 

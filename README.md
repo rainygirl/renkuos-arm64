@@ -86,18 +86,16 @@ disk (`renku-arm64-vm.img`) persists between runs either way.
 
 ## Installing the R\* apps
 
-```sh
-cd renku-repo/arm64 && python3 -m http.server 8641   # on the host, once
-```
-
-then inside the guest (Terminal):
+Inside the guest (Terminal):
 
 ```sh
-pkgman add-repo http://10.0.2.2:8641
+pkgman add-repo https://pkgman.rainygirl.com/arm64
 pkgman install -y rmemo rtiler rmarkdown rsoundeditor rworldradio rqrreader rtemperature
 ```
 
-`10.0.2.2` is the host Mac as seen through QEMU's network.
+That repository also carries more R\* apps than the ones installed above
+(`rchromium`, `rtwitter`, `rspectrum`, and others) -- `pkgman search` inside
+the guest lists everything currently published.
 
 ## Known limitations
 

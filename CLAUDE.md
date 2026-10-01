@@ -55,6 +55,6 @@ The disk (`renku-arm64-vm.img`) persists between runs.
 ## Status
 
 Verified: boots to a desktop under `hvf` at native speed, with audio,
-WebPositive, and the R* apps (installed separately from the
-`renku-repo/` / hosted RENKU Apps package repository via `pkgman`, not
-baked into the ISO).
+WebPositive, and the R* apps (installed separately from the hosted RENKU
+Apps package repository, https://pkgman.rainygirl.com/arm64, via `pkgman`,
+not baked into the ISO).

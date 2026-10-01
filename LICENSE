@@ -32,7 +32,8 @@ follows its own license -- see
 https://github.com/RenkuOS/Source/blob/main/License.md -- which, like
 upstream Haiku, is mostly MIT with some files under other licenses.
 
-`arm64-patch/packages/` and `renku-repo/` contain prebuilt binary packages
-built from their own upstream projects (curl, wget, zstd, OpenSSL,
-HaikuWebKit, and others). Each follows that project's own license, not this
-one.
+`arm64-patch/packages/` contains prebuilt binary packages built from their
+own upstream projects (curl, wget, zstd, OpenSSL, HaikuWebKit, and others).
+Each follows that project's own license, not this one. The R* apps
+installed via `pkgman` from https://pkgman.rainygirl.com/arm64 are not part
+of this repository at all.
