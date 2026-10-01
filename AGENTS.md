@@ -4,8 +4,7 @@
 
 What `README.md` doesn't cover: how the build works, what the patches do,
 and traps worth knowing before touching any of it. If you're an AI agent
-working in this directory, this file *is* your CLAUDE.md -- that file is
-now just a pointer here.
+working in this directory, read this file before doing anything.
 
 ## Commands
 
