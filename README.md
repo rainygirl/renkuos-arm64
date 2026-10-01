@@ -84,19 +84,6 @@ After that, `./run-qemu-renku-arm64.sh` (no `--install`) boots the installed
 disk directly. `--headless` drops the window (serial console only); the
 disk (`renku-arm64-vm.img`) persists between runs either way.
 
-## Installing the R\* apps
-
-Inside the guest (Terminal):
-
-```sh
-pkgman add-repo https://pkgman.rainygirl.com/arm64
-pkgman install -y rmemo rtiler rmarkdown rsoundeditor rworldradio rqrreader rtemperature
-```
-
-That repository also carries more R\* apps than the ones installed above
-(`rchromium`, `rtwitter`, `rspectrum`, and others) -- `pkgman search` inside
-the guest lists everything currently published.
-
 ## Known limitations
 
 WebPositive does not play HTML5 audio or video (YouTube says it can't play

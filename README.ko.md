@@ -84,19 +84,6 @@ OS가 하나도 없는 빈 디스크만 만들어집니다.
 바로 부팅합니다. `--headless`는 창 없이 시리얼 콘솔만 씁니다. 디스크
 (`renku-arm64-vm.img`)는 어느 쪽이든 계속 남습니다.
 
-## R\* 앱 설치
-
-게스트 안(Terminal)에서:
-
-```sh
-pkgman add-repo https://pkgman.rainygirl.com/arm64
-pkgman install -y rmemo rtiler rmarkdown rsoundeditor rworldradio rqrreader rtemperature
-```
-
-이 저장소엔 위에서 설치한 것 말고도 R\* 앱이 더 있습니다(`rchromium`,
-`rtwitter`, `rspectrum` 등) -- 게스트 안에서 `pkgman search`로 지금
-올라와 있는 전체 목록을 볼 수 있습니다.
-
 ## 알려진 한계
 
 WebPositive에서 HTML5 오디오·비디오가 재생되지 않습니다(유튜브가 재생 못
