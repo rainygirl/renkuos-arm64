@@ -48,7 +48,7 @@ SKIP_CROSS_TOOLS=1 ./build-renku-arm64-iso.sh
 
 로 재사용해서 훨씬 빨리 끝납니다.
 
-## 디스크에 설치하기
+## QEMU로 띄워보기
 
 `./run-qemu-renku-arm64.sh`를 그냥 실행하기 전에 이것부터 하세요: 막 받은
 상태엔 아직 아무것도 설치돼 있지 않아서, `--install` 없이 먼저 부팅하면

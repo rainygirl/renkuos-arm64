@@ -47,7 +47,7 @@ SKIP_CROSS_TOOLS=1 ./build-renku-arm64-iso.sh
 
 reuses it and takes much less time.
 
-## Installing to the disk
+## Trying it in QEMU
 
 Do this before plain `./run-qemu-renku-arm64.sh`: on a fresh checkout there is
 nothing installed yet, so booting without `--install` first just creates an
