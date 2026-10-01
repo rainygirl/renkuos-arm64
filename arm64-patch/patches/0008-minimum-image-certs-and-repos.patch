@@ -1,0 +1,86 @@
+Subject: [PATCH] minimum image: root certificates, and only repositories that fit
+
+- Add ca_root_certificates. openssl3 was already in the minimum image, but
+  without a trust store it cannot verify any server. (The package is
+  zstd-compressed, so this needs 0009 as well, or packagefs never activates
+  it.)
+- Install no upstream repository config on arm64. HaikuPorts publishes no
+  arm64 repository (the URL answers with an empty listing), so its config
+  only made every pkgman refresh fail. Haiku's does exist, but its haiku
+  package is a newer hrev built without this image's patches, so
+  "pkgman update" would replace the system package and take away the media
+  stack, the PL031 clock, zstd support and the R Chromium fixes. Both stay
+  in HAIKU_REPOSITORIES because the build itself downloads from them.
+- Ship the RENKU Apps repository config on arm64, so the applications can
+  be installed with pkgman straight away.
+
+diff --git a/build/jam/DefaultBuildProfiles b/build/jam/DefaultBuildProfiles
+index 9bae1739c6..41dff883bb 100644
+--- a/build/jam/DefaultBuildProfiles
++++ b/build/jam/DefaultBuildProfiles
+@@ -184,7 +184,11 @@ rule DefineDefaultBuildProfiles
+ 				HAIKU_IMAGE_SIZE ?= 450 ;
+ 			}
+ 
++			# openssl3 alone cannot verify any server: without the root
++			# certificates every https request fails "certificate verify
++			# failed", pkgman included.
+ 			AddHaikuImageSystemPackages
++				ca_root_certificates
+ 				openssl3
+ 				;
+ 		}
+diff --git a/build/jam/images/definitions/minimum b/build/jam/images/definitions/minimum
+index 7a4104a65e..496af4ec5d 100644
+--- a/build/jam/images/definitions/minimum
++++ b/build/jam/images/definitions/minimum
+@@ -445,6 +445,17 @@ AddFilesToHaikuImage system settings network : $(networkSettingsFiles) ;
+ # repository config and cache files
+ local repository ;
+ for repository in $(HAIKU_REPOSITORIES) {
++	# Neither upstream repository suits this arm64 image. HaikuPorts publishes
++	# no arm64 repository at all (its URL answers with an empty listing), so
++	# its config only makes every pkgman command fail. Haiku's does exist, but
++	# its haiku package is a newer hrev built without this image's patches:
++	# "pkgman update" would swap it in and take away the media stack, the
++	# PL031 clock, zstd support and the fixes R Chromium needs. Both are still
++	# needed at build time, which is why they stay in the list.
++	if $(HAIKU_PACKAGING_ARCHS[1]) = arm64
++		&& ( $(repository:G=) = HaikuPorts || $(repository:G=) = Haiku ) {
++		continue ;
++	}
+ 	local config = [ on $(repository) return $(HAIKU_REPOSITORY_CONFIG_FILE) ] ;
+ 	local cache = [ on $(repository) return $(HAIKU_REPOSITORY_CACHE_FILE) ] ;
+ 	if $(HAIKU_UPDATE_ALL_PACKAGES) {
+@@ -455,3 +466,13 @@ for repository in $(HAIKU_REPOSITORIES) {
+ 	AddFilesToHaikuImage system cache package-repositories
+ 		: $(cache) : $(repository:G=) ;
+ }
++
++# On arm64 the applications come from the RENKU Apps repository; ship its
++# config so pkgman can install them without an add-repo first.
++if $(HAIKU_PACKAGING_ARCHS[1]) = arm64 {
++	local renkuApps = <repository-config>renku-apps ;
++	SEARCH on $(renkuApps)
++		= [ FDirName $(HAIKU_TOP) data settings package-repositories ] ;
++	AddFilesToHaikuImage system settings package-repositories
++		: $(renkuApps) : "RENKU Apps" ;
++}
+diff --git a/data/settings/package-repositories/renku-apps b/data/settings/package-repositories/renku-apps
+new file mode 100644
+index 0000000000..7d5fe511a9
+--- /dev/null
++++ b/data/settings/package-repositories/renku-apps
+@@ -0,0 +1,12 @@
++cfgversion=2
++
++# the url where the repository data can be accessed.
++baseurl=https://pkgman.rainygirl.com/arm64
++
++# an identifier for the repository that is consistent across mirrors
++identifier=tag:renku-os,2026:apps
++
++# a deprecated copy of the [identifier] key above for older os versions
++url=tag:renku-os,2026:apps
++
++priority=1

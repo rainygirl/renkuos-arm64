@@ -1,0 +1,278 @@
+Subject: [PATCH] arm64: read the PL031 clock at boot, reboot and power off via PSCI
+
+Two things every arm64 guest on QEMU virt got wrong:
+
+- The clock started at 1 January 1970 on every boot. Nothing read the
+  machine's PL031 real-time clock, and at that date no TLS certificate is
+  valid, so every https request - pkgman included - failed "certificate
+  verify failed". The loader now finds the PL031 in the device tree, or,
+  under ACPI where EDK2 withholds the device tree, uses QEMU virt's fixed
+  0x09010000 when the FADT OEM id is "BOCHS ". The kernel maps it and
+  arch_rtc_init() reads real time.
+
+- Reboot and shutdown never finished. arch_cpu_shutdown() returned an error,
+  so the kernel stopped with the last frame on screen ("Asking other
+  processes to quit." or "It's now safe to turn off the computer"). It now
+  issues PSCI SYSTEM_RESET / SYSTEM_OFF through whichever conduit (SMC or
+  HVC) the loader already worked out to start the secondary CPUs.
+
+Taken from haiku-rwebpositive-arm64 (haiku-arm64-pl031-rtc.patch,
+haiku-arm64-psci-reboot.patch) and adapted to this tree: it already has the
+SMP/FADT code those patches expected alongside, and it has no
+gARM64ShutdownFn hook, so arch_cpu_shutdown() calls PSCI directly.
+
+diff --git a/headers/private/kernel/arch/arm64/arch_kernel_args.h b/headers/private/kernel/arch/arm64/arch_kernel_args.h
+index 459ce88c4b..12851109c2 100644
+--- a/headers/private/kernel/arch/arm64/arch_kernel_args.h
++++ b/headers/private/kernel/arch/arm64/arch_kernel_args.h
+@@ -35,6 +35,18 @@ typedef struct {
+ 	uart_info	uart;
+ 	intc_info	interrupt_controller;
+ 
++	// ARM PrimeCell PL031 real-time clock registers (QEMU virt has one);
++	// size is 0 when the device tree names none.
++	addr_range	pl031_rtc;
++
++	// How to reach PSCI, which is the only way this architecture has to
++	// reboot or power off a generic machine. The loader already works this
++	// out to start the secondary CPUs -- from the FADT, or from the device
++	// tree "method" property -- so it passes on what it found rather than
++	// making the kernel discover it a second time.
++	uint8		psci_available;
++	uint8		psci_use_hvc;
++
+ } _PACKED arch_kernel_args;
+ 
+ #endif	/* KERNEL_ARCH_ARM64_KERNEL_ARGS_H */
+diff --git a/src/system/boot/platform/efi/arch/arm64/arch_acpi.cpp b/src/system/boot/platform/efi/arch/arm64/arch_acpi.cpp
+index 00bb941a8e..1622cdc886 100644
+--- a/src/system/boot/platform/efi/arch/arm64/arch_acpi.cpp
++++ b/src/system/boot/platform/efi/arch/arm64/arch_acpi.cpp
+@@ -94,6 +94,20 @@ arch_handle_acpi()
+ 		arm64_handle_acpi_fadt(fadt->arm_boot_arch);
+ 	}
+ 
++	// QEMU's virt machine describes its PL031 RTC only in the DSDT (device
++	// ARMH0011), which this loader does not interpret, and EDK2 withholds the
++	// device tree once ACPI is in use, so the FDT path in arch_dtb.cpp never
++	// sees it. The virt memory map is fixed, so when the firmware is QEMU's
++	// (OEM id "BOCHS ") use the known address. Any other firmware gets no RTC
++	// rather than a guess.
++	addr_range &rtc = gKernelArgs.arch_args.pl031_rtc;
++	if (rtc.size == 0 && fadt != NULL
++		&& memcmp(fadt->header.oem_id, "BOCHS ", 6) == 0) {
++		rtc.start = 0x09010000;
++		rtc.size = 0x1000;
++		dprintf("assuming QEMU virt pl031 rtc at %#" B_PRIx64 "\n", rtc.start);
++	}
++
+ 	acpi_madt *madt = (acpi_madt*)acpi_find_table(ACPI_MADT_SIGNATURE);
+ 	if (madt != NULL) {
+ 		uint64 gicc_base = 0;
+diff --git a/src/system/boot/platform/efi/arch/arm64/arch_dtb.cpp b/src/system/boot/platform/efi/arch/arm64/arch_dtb.cpp
+index 500e25cc3e..436ad665c5 100644
+--- a/src/system/boot/platform/efi/arch/arm64/arch_dtb.cpp
++++ b/src/system/boot/platform/efi/arch/arm64/arch_dtb.cpp
+@@ -59,6 +59,16 @@ arch_handle_fdt(const void* fdt, int node)
+ 	if (compatible == NULL)
+ 		return;
+ 
++	// The kernel has no libfdt of its own, so the PL031 RTC is located here
++	// and handed over through kernel_args, the same way the UART is.
++	addr_range &rtc = gKernelArgs.arch_args.pl031_rtc;
++	if (rtc.size == 0 && dtb_has_fdt_string(compatible, compatibleLen, "arm,pl031")) {
++		if (dtb_get_reg(fdt, node, 0, rtc)) {
++			dprintf("discovered pl031 rtc at %#" B_PRIx64 "\n", rtc.start);
++		} else
++			rtc.size = 0;
++	}
++
+ 	intc_info &interrupt_controller = gKernelArgs.arch_args.interrupt_controller;
+ 	if (interrupt_controller.kind[0] == 0) {
+ 		for (uint32 i = 0; i < B_COUNT_OF(kSupportedInterruptControllers); i++) {
+diff --git a/src/system/boot/platform/efi/arch/arm64/arch_smp.cpp b/src/system/boot/platform/efi/arch/arm64/arch_smp.cpp
+index e697a773e3..9f0399541d 100644
+--- a/src/system/boot/platform/efi/arch/arm64/arch_smp.cpp
++++ b/src/system/boot/platform/efi/arch/arm64/arch_smp.cpp
+@@ -267,6 +267,9 @@ arm64_handle_acpi_fadt(acpi_fadt_arm_boot_arch armBootFlags)
+ 		sPsciCallFn = arm64_psci_call_hvc;
+ 	else
+ 		sPsciCallFn = arm64_psci_call_smc;
++
++	gKernelArgs.arch_args.psci_available = 1;
++	gKernelArgs.arch_args.psci_use_hvc = armBootFlags.psci_use_hvc ? 1 : 0;
+ }
+ 
+ 
+@@ -278,8 +281,12 @@ arm64_handle_fdt_psci_node(const void* fdt, int node)
+ 
+ 	if (strcmp(method, "smc") == 0) {
+ 		sPsciCallFn = arm64_psci_call_smc;
++		gKernelArgs.arch_args.psci_available = 1;
++		gKernelArgs.arch_args.psci_use_hvc = 0;
+ 	} else if (strcmp(method, "hvc") == 0) {
+ 		sPsciCallFn = arm64_psci_call_hvc;
++		gKernelArgs.arch_args.psci_available = 1;
++		gKernelArgs.arch_args.psci_use_hvc = 1;
+ 	}
+ }
+ 
+diff --git a/src/system/kernel/arch/arm64/arch_cpu.cpp b/src/system/kernel/arch/arm64/arch_cpu.cpp
+index cfdfffeede..996bd0ba9d 100644
+--- a/src/system/kernel/arch/arm64/arch_cpu.cpp
++++ b/src/system/kernel/arch/arm64/arch_cpu.cpp
+@@ -14,6 +14,35 @@
+ 
+ extern "C" void _exception_vectors(void);
+ 
++// PSCI is how a generic ARM machine reboots or powers off. Without it
++// arch_cpu_shutdown() returns B_UNSUPPORTED and the kernel simply stops:
++// the registrar has already torn the desktop down and released the
++// framebuffer by then, so the screen keeps whatever was last drawn -- a
++// shutdown dialog that looks stuck when in fact everything is finished and
++// only the final reset never happens, which on QEMU virt was every reboot.
++#define PSCI_SYSTEM_OFF		0x84000008UL
++#define PSCI_SYSTEM_RESET	0x84000009UL
++
++static bool sPsciAvailable = false;
++static bool sPsciUseHvc = false;
++
++static status_t
++arm64_psci_shutdown(bool reboot)
++{
++	register uint64 x0 asm("x0") = reboot ? PSCI_SYSTEM_RESET : PSCI_SYSTEM_OFF;
++	register uint64 x1 asm("x1") = 0;
++	register uint64 x2 asm("x2") = 0;
++	register uint64 x3 asm("x3") = 0;
++
++	if (sPsciUseHvc)
++		asm volatile("hvc #0" :: "r" (x0), "r" (x1), "r" (x2), "r" (x3));
++	else
++		asm volatile("smc #0" :: "r" (x0), "r" (x1), "r" (x2), "r" (x3));
++
++	// PSCI does not return on success.
++	return B_ERROR;
++}
++
+ 
+ status_t
+ arch_cpu_preboot_init_percpu(kernel_args *args, int curr_cpu)
+@@ -55,6 +84,12 @@ arch_cpu_init(kernel_args *args)
+ 		cpu->topology_id[CPU_TOPOLOGY_CORE] = i;
+ 		cpu->topology_id[CPU_TOPOLOGY_SMT] = 0;
+ 	}
++
++	if (args->arch_args.psci_available != 0) {
++		sPsciUseHvc = args->arch_args.psci_use_hvc != 0;
++		sPsciAvailable = true;
++	}
++
+ 	return B_OK;
+ }
+ 
+@@ -76,8 +111,10 @@ arch_cpu_init_post_modules(kernel_args *args)
+ status_t
+ arch_cpu_shutdown(bool reboot)
+ {
+-	// never reached
+-	return B_ERROR;
++	if (sPsciAvailable)
++		return arm64_psci_shutdown(reboot);
++
++	return B_UNSUPPORTED;
+ }
+ 
+ 
+diff --git a/src/system/kernel/arch/arm64/arch_real_time_clock.cpp b/src/system/kernel/arch/arm64/arch_real_time_clock.cpp
+index a0ee708356..e4fdd814cd 100644
+--- a/src/system/kernel/arch/arm64/arch_real_time_clock.cpp
++++ b/src/system/kernel/arch/arm64/arch_real_time_clock.cpp
+@@ -1,17 +1,67 @@
+ /*
+- * Copyright 2019 Haiku, Inc. All Rights Reserved.
++ * Copyright 2019-2026 Haiku, Inc. All rights reserved.
+  * Distributed under the terms of the MIT License.
+  */
++
++
+ #include <arch/real_time_clock.h>
+ 
++#include <boot/kernel_args.h>
+ #include <real_time_clock.h>
+ #include <real_time_data.h>
+ #include <smp.h>
++#include <vm/vm.h>
++
++
++// ARM PrimeCell PL031 real-time clock. QEMU's virt machine has one, and
++// without it the kernel has no time source at all and boots into 1970,
++// which breaks every TLS certificate check. The boot loader finds the
++// device in the device tree and passes its registers in kernel_args.
++#define PL031_RTCDR		0x000	// data: seconds since the epoch
++#define PL031_RTCLR		0x008	// load: writing sets the counter
++#define PL031_RTCCR		0x00c	// control: bit 0 enables the counter
++
++static volatile uint8* sPL031 = NULL;
++
++
++static inline uint32
++pl031_read(uint32 reg)
++{
++	return *(volatile uint32*)(sPL031 + reg);
++}
++
++
++static inline void
++pl031_write(uint32 reg, uint32 value)
++{
++	*(volatile uint32*)(sPL031 + reg) = value;
++}
+ 
+ 
+ status_t
+ arch_rtc_init(kernel_args *args, struct real_time_data *data)
+ {
++	addr_range& regs = args->arch_args.pl031_rtc;
++	if (regs.size == 0)
++		return B_OK;
++
++	// vm_init() has run, so areas can be created; this runs on the boot
++	// CPU only, before other threads exist.
++	void* base = NULL;
++	area_id area = vm_map_physical_memory(B_SYSTEM_TEAM, "pl031 rtc", &base,
++		B_ANY_KERNEL_ADDRESS, ROUNDUP(regs.size, B_PAGE_SIZE),
++		B_KERNEL_READ_AREA | B_KERNEL_WRITE_AREA, regs.start, false);
++	if (area < 0) {
++		dprintf("arch_rtc_init: mapping pl031 at %#" B_PRIx64 " failed: %s\n",
++			regs.start, strerror(area));
++		return B_OK;
++	}
++
++	sPL031 = (volatile uint8*)base;
++	if ((pl031_read(PL031_RTCCR) & 1) == 0)
++		pl031_write(PL031_RTCCR, 1);
++	dprintf("arch_rtc_init: pl031 rtc at %#" B_PRIx64 ", time %" B_PRIu32 "\n",
++		regs.start, pl031_read(PL031_RTCDR));
+ 	return B_OK;
+ }
+ 
+@@ -19,13 +69,18 @@ arch_rtc_init(kernel_args *args, struct real_time_data *data)
+ uint64
+ arch_rtc_get_hw_time(void)
+ {
+-	return 0;
++	if (sPL031 == NULL)
++		return 0;
++	return pl031_read(PL031_RTCDR);
+ }
+ 
+ 
+ void
+ arch_rtc_set_hw_time(uint64 seconds)
+ {
++	if (sPL031 == NULL)
++		return;
++	pl031_write(PL031_RTCLR, (uint32)seconds);
+ }
+ 
+ 

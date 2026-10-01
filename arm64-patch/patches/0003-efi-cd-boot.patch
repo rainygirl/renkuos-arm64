@@ -1,0 +1,64 @@
+Subject: [PATCH] build: make @minimum-cd produce an EFI-bootable ISO
+
+On an EFI target (arm64, and EFI x86) HAIKU_BOOT_FLOPPY is the BIOS boot
+floppy, which neither builds nor helps: BuildCDBootImageEFI then passes an
+empty -b to xorriso and the build fails. Pass the already-built EFI system
+partition (esp.image) as the CD boot image instead, and emit it as a
+no-emulation El Torito UEFI entry rather than a floppy-emulation BIOS entry.
+
+Verified on arm64: xorriso -report_el_torito reports "El Torito boot img :
+1 UEFI", EDK II starts haiku_loader from the ISO, and the Haiku Boot Loader
+menu appears.
+
+CAVEAT - the boot then goes no further. haiku_loader has to mount the medium
+it came from to load the kernel and packages, and it has no iso9660 driver
+(src/system/boot/loader/file_systems/ has bfs, fat, tarfs, packagefs,
+hfs_plus and amiga_ffs only), so it stops with "Cannot continue booting
+(Boot volume is not valid)" - no kernel, no desktop, no live session, no
+Installer. Upstream solves this with the anyboot hybrid, which carries a
+real BFS partition the loader can read; its jam rule needs the x86 MBR
+assembly and the BIOS boot CD, and neither builds on arm64. Boot the raw
+.image / .mmc medium instead and run the Installer from there, onto a
+separate disk - see ../README.md.
+diff --git a/build/jam/images/HaikuCD b/build/jam/images/HaikuCD
+index a09dcc1d16..883250df43 100644
+--- a/build/jam/images/HaikuCD
++++ b/build/jam/images/HaikuCD
+@@ -64,7 +64,13 @@ rule _BuildHaikuCD haikuCD : bootFloppy
+ }
+ 
+ # build the cd
+-_BuildHaikuCD $(HAIKU_CD) : $(HAIKU_BOOT_FLOPPY) ;
++# On EFI targets the BIOS boot floppy is neither buildable nor useful; the EFI
++# system partition image is what the firmware needs to find via El Torito.
++local haikuCDBootImage = $(HAIKU_BOOT_FLOPPY) ;
++if $(HAIKU_KERNEL_PLATFORM) = efi {
++	haikuCDBootImage = esp.image ;
++}
++_BuildHaikuCD $(HAIKU_CD) : $(haikuCDBootImage) ;
+ NotFile haiku-cd ;
+ Depends haiku-cd : $(HAIKU_CD) ;
+ 
+diff --git a/build/scripts/build_haiku_image b/build/scripts/build_haiku_image
+index af227dbe6c..7f275c470c 100755
+--- a/build/scripts/build_haiku_image
++++ b/build/scripts/build_haiku_image
+@@ -392,8 +392,16 @@ if [ $isCD ]; then
+ 	if command -v xorriso; then
+ 		# build the iso image using xorriso
+ 		echo "Building CD image..."
+-		xorriso -as mkisofs -r -b `basename $cdBootFloppy` \
+-			-V "$cdLabel" -o "$cdImagePath" "$tPrefix"
++		bootImage=`basename $cdBootFloppy`
++		if [ "$bootImage" = "esp.image" ]; then
++			# EFI system partition: no-emulation El Torito UEFI entry
++			xorriso -as mkisofs -r -V "$cdLabel" \
++				-e "$bootImage" -no-emul-boot \
++				-o "$cdImagePath" "$tPrefix"
++		else
++			xorriso -as mkisofs -r -b "$bootImage" \
++				-V "$cdLabel" -o "$cdImagePath" "$tPrefix"
++		fi
+ 	else
+ 		echo "you need xorriso to create a CD image."
+ 		exit 1

@@ -1,0 +1,12 @@
+diff --git a/src/add-ons/translators/wonderbrush/Jamfile b/src/add-ons/translators/wonderbrush/Jamfile
+index 45bc59b438..14b1a0dded 100644
+--- a/src/add-ons/translators/wonderbrush/Jamfile
++++ b/src/add-ons/translators/wonderbrush/Jamfile
+@@ -1,6 +1,7 @@
+ SubDir HAIKU_TOP src add-ons translators wonderbrush ;
+ 
+ SubDirHdrs [ FDirName $(SUBDIR) $(DOTDOT) shared ] ;
++SubDirHdrs [ FDirName $(SUBDIR) support ] ;
+ 
+ AddResources WonderBrushTranslator : WonderBrushTranslator.rdef ;
+ 

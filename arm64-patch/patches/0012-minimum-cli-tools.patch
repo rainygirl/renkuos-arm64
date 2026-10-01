@@ -1,0 +1,83 @@
+Subject: [PATCH] minimum arm64: ship curl, grep, gzip, less, sed, tar and wget
+
+A fresh RENKU arm64 guest had no way to fetch or unpack anything except
+pkgman: no curl, wget, tar, gzip, grep or sed, no python, and a bash built
+without /dev/tcp. grep, less and sed come from the HaikuPorts arm64
+bootstrap packages the build already downloads. curl (OpenSSL), wget
+(OpenSSL), tar and gzip are not on HaikuPorts for arm64; they are
+cross-built by pkgman-repo's scripts/cross-arm64-cli.sh, published in RENKU
+Apps, and listed here under their own names like zstd in 0009. Their hpkgs
+are in ../packages/, and add-media-arm64.sh copies them into the generated
+directory's download/.
+
+The bootstrap curl and curl_devel are dropped from the repository list: one
+repository cannot hold two packages named curl ("package curl has already
+been added!"), and nothing in the build uses curl_devel.
+
+The copies in ../packages/ say vendor "Haiku Project": package_repo refuses
+a package whose vendor differs from the repository's, and this is the
+HaikuPorts build repository. The ones published in RENKU Apps say "RENKU"
+for the same reason. Because the repository list changed, its checksum no
+longer matches anything on Haiku's CDN; build with HAIKU_NO_DOWNLOADS=1 so
+jam indexes download/ locally instead of fetching.
+
+If @minimum-anyboot then fails with "failed to open ISO file", build
+haiku-boot-cd.iso first (jam -q @minimum-anyboot haiku-boot-cd.iso): the
+anyboot rule reads it but did not rebuild it after it went missing.
+
+diff -ru a/build/jam/DefaultBuildProfiles b/build/jam/DefaultBuildProfiles
+--- a/build/jam/DefaultBuildProfiles	2026-09-30 09:39:31.131886997 +0000
++++ b/build/jam/DefaultBuildProfiles	2026-09-30 09:39:31.132887281 +0000
+@@ -191,6 +191,24 @@
+ 				ca_root_certificates
+ 				openssl3
+ 				;
++
++			# A fresh arm64 guest had no way to fetch or unpack anything but
++			# pkgman: no wget, tar, gzip, grep or sed, and bash without /dev/tcp.
++			# grep, less and sed are HaikuPorts bootstrap packages; wget, tar and
++			# gzip are cross-built (pkgman-repo scripts/cross-arm64-cli.sh), and
++			# so is curl, which needs the SOCK_NONBLOCK fix in 0013 or its own
++			# workaround (it has both).
++			if $(TARGET_PACKAGING_ARCH) = arm64 {
++				AddHaikuImageSystemPackages
++					curl
++					grep
++					gzip
++					less
++					sed
++					tar
++					wget
++					;
++			}
+ 		}
+ 
+ 		case "test-*" : {
+diff -ru a/build/jam/repositories/HaikuPorts/arm64 b/build/jam/repositories/HaikuPorts/arm64
+--- a/build/jam/repositories/HaikuPorts/arm64	2026-09-30 09:39:31.132887281 +0000
++++ b/build/jam/repositories/HaikuPorts/arm64	2026-09-30 09:39:31.133887565 +0000
+@@ -15,8 +15,9 @@
+ 	binutils-2.41_2026_03_10_bootstrap-1
+ 	bison-3.8.2_bootstrap-1
+ 	coreutils-9.9_bootstrap-1
+-	curl-8.19.0_bootstrap-1
+-	curl_devel-8.19.0_bootstrap-1
++	# curl and curl_devel 8.19.0_bootstrap are replaced by the cross-built
++	# curl below (one repository cannot hold two packages named curl, and
++	# nothing in the build uses curl_devel).
+ 	expat-2.5.0_bootstrap-1
+ 	expat_devel-2.5.0_bootstrap-1
+ 	findutils-4.9.0_bootstrap-1
+@@ -48,6 +49,12 @@
+ 	# zstd-compressed package, which is what every HaikuPorts package is.
+ 	zstd-1.5.6-2
+ 	zstd_devel-1.5.6-2
++	# Also not in HaikuPorts for arm64: cross-built by pkgman-repo's
++	# scripts/cross-arm64-cli.sh and published in RENKU Apps.
++	curl-8.22.0-2
++	gzip-1.13-1
++	tar-1.35-1
++	wget-1.24.5-1
+ 	:
+ 	# source packages
+ 	bash

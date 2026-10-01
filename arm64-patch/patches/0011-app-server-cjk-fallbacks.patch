@@ -1,0 +1,33 @@
+Subject: [PATCH] app_server: fall back to any Noto Sans CJK variant
+
+Missing glyphs fall back to a fixed list of Noto families, and the only CJK
+entry was "Noto Sans CJK JP". On arm64 that family cannot be used: the
+HaikuPorts package ships it as a variable font, which the arm64 freetype
+(2.6.3) cannot load, so RENKU installs the static Noto Sans CJK KR faces
+instead - and with nothing named JP installed, every Korean, Japanese and
+Chinese string drew as boxes, even with a CJK font present.
+
+All Noto Sans CJK variants carry the same Hangul, kana and Han glyph set;
+list KR, SC and TC after JP so whichever is installed is used.
+
+Found with haiku-korean-pack on arm64: the Korean catalogs loaded (menu and
+column labels changed length) but rendered as empty boxes.
+
+diff --git a/src/servers/app/font/GlyphLayoutEngine.h b/src/servers/app/font/GlyphLayoutEngine.h
+index 85ecf015be..1a59419d84 100644
+--- a/src/servers/app/font/GlyphLayoutEngine.h
++++ b/src/servers/app/font/GlyphLayoutEngine.h
+@@ -419,6 +419,13 @@ GlyphLayoutEngine::PopulateFallbacks(
+ 		"Noto Sans",
+ 		"Noto Sans Thai",
+ 		"Noto Sans CJK JP",
++		// All Noto Sans CJK variants carry the same Hangul, kana and Han
++		// glyphs. Where the JP one cannot be had -- HaikuPorts ships it as a
++		// variable font, which an older freetype cannot load, so RENKU arm64
++		// installs the static KR faces instead -- any of the others will do.
++		"Noto Sans CJK KR",
++		"Noto Sans CJK SC",
++		"Noto Sans CJK TC",
+ 		"Noto Sans Cherokee",
+ 		"Noto Sans Symbols",
+ 		"Noto Sans Symbols 2",

@@ -1,0 +1,38 @@
+MIT License
+
+Copyright (c) 2026 the RENKU arm64 project
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+
+-------------------------------------------------------------------------------
+
+Scope: the above covers this repository's own original work -- the build
+scripts (`build-renku-arm64-iso.sh`, `run-renku-arm64.sh`), the patches in
+`arm64-patch/patches/`, and the documentation.
+
+This repository builds and patches RenkuOS (https://github.com/RenkuOS/Source),
+which is not included here and is not covered by the license above. RenkuOS
+follows its own license -- see
+https://github.com/RenkuOS/Source/blob/main/License.md -- which, like
+upstream Haiku, is mostly MIT with some files under other licenses.
+
+`arm64-patch/packages/` and `renku-repo/` contain prebuilt binary packages
+built from their own upstream projects (curl, wget, zstd, OpenSSL,
+HaikuWebKit, and others). Each follows that project's own license, not this
+one.

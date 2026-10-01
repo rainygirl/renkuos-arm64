@@ -1,0 +1,99 @@
+Subject: [PATCH] minimum arm64: ship WebPositive
+
+WebPositive is not compiled here: `src/apps/webpositive/Jamfile` only
+builds it when `haikuwebkit_devel` is available, and turning that build
+feature on means linking this tree against a full browser engine, which is
+a different undertaking from packaging one. Instead this adds the already
+prebuilt `webpositive` package straight to the image, the same way 0012
+adds prebuilt curl/wget/tar/gzip rather than building them from source.
+
+webpositive needs haikuwebkit (the engine) at runtime, sqlite3 (its cookie
+jar and web storage), dav1d and libavif1.0 (AV1/AVIF image decoding), and
+noto_sans_cjk_kr (without it Korean/Japanese/Chinese draw as empty boxes).
+None of the five are on HaikuPorts for arm64, so -- like curl/wget/tar/gzip
+-- they are declared in the arm64 repository list and expected to be
+staged into the generated directory's download/ before the build; the
+hpkg files are in ../packages/, and add-media-arm64.sh copies them there.
+
+haikuwebkit_devel is deliberately not listed: nothing in this image links
+against it, only the base haikuwebkit runtime it depends on.
+
+Also declares openssl3 and openssl3_devel, which turned out not to be
+declared anywhere despite 0008 already listing openssl3 in
+AddHaikuImageSystemPackages for the root-certificate fix. That worked only
+by accident, carried by a hpkg that had been placed in some earlier build's
+download/ by hand and never captured in a patch: AddRepositoryPackage
+silently drops any package with no matching file under HAIKU_NO_DOWNLOADS=1
+rather than failing the build, so the gap went unnoticed until haikuwebkit
+needed lib:libcrypto and the dependency solver had nothing to offer it.
+curl and wget need it too (lib:libssl); their own patch (0012) happened to
+predate anyone building with HAIKU_NO_DOWNLOADS=1 and a clean download/, so
+the gap is fixed here instead, where it first became impossible to miss.
+
+diff --git a/build/jam/DefaultBuildProfiles b/build/jam/DefaultBuildProfiles
+index 7bf5f19b82..2999e2ae6b 100644
+--- a/build/jam/DefaultBuildProfiles
++++ b/build/jam/DefaultBuildProfiles
+@@ -209,6 +209,23 @@ rule DefineDefaultBuildProfiles
+ 					wget
+ 					;
+ 			}
++
++			# WebPositive itself, and the packages it needs that HaikuPorts does
++			# not publish for arm64: HaikuWebKit, sqlite3 (its cookie jar and
++			# web storage), dav1d and libavif1.0 (AV1/AVIF image decoding), and
++			# CJK glyphs, without which Korean/Japanese/Chinese draw as boxes.
++			# All are prebuilt for arm64 and published in RENKU Apps -- webkit
++			# is a full browser engine, not something this build compiles.
++			if $(TARGET_PACKAGING_ARCH) = arm64 {
++				AddHaikuImageSystemPackages
++					dav1d
++					haikuwebkit
++					libavif1.0
++					noto_sans_cjk_kr
++					sqlite3
++					webpositive
++					;
++			}
+ 		}
+
+ 		case "test-*" : {
+diff --git a/build/jam/repositories/HaikuPorts/arm64 b/build/jam/repositories/HaikuPorts/arm64
+index a702c4a83c..fecbe51d03 100644
+--- a/build/jam/repositories/HaikuPorts/arm64
++++ b/build/jam/repositories/HaikuPorts/arm64
+@@ -6,9 +6,18 @@ RemotePackageRepository HaikuPorts
+ 	ca_root_certificates-2025_12_02-1
+ 	haikuporter-0_bootstrap-1
+ 	noto-20170202_bootstrap-7
++	noto_sans_cjk_kr-2.004-1
+ 	:
+ 	# repository architecture packages
+ 	# primary architecture (arm64)
++	# Not on HaikuPorts for arm64 either (see the curl/wget note below): TLS
++	# for curl, wget and HaikuWebKit alike. Also what lets openssl3's own
++	# AddHaikuImageSystemPackages entry in DefaultBuildProfiles resolve --
++	# without a hpkg here HAIKU_NO_DOWNLOADS=1 drops it from the local
++	# repository index silently, and every https request, pkgman's included,
++	# fails much later with "certificate verify failed".
++	openssl3-3.5.4-1
++	openssl3_devel-3.5.4-1
+ 	bash-5.3_bootstrap-1
+ 	binutils-2.41_2026_03_10_bootstrap-1
+ 	bison-3.8.2_bootstrap-1
+@@ -53,6 +62,15 @@ RemotePackageRepository HaikuPorts
+ 	gzip-1.13-1
+ 	tar-1.35-1
+ 	wget-1.24.5-1
++	# WebPositive and its remaining runtime dependencies -- also not on
++	# HaikuPorts for arm64. webpositive is prebuilt (this tree is not asked
++	# to compile a browser engine); haikuwebkit_devel is deliberately not
++	# listed, since nothing here links against it.
++	dav1d-1.4.3-1
++	haikuwebkit-1.10.0-3
++	libavif1.0-1.1.1-1
++	sqlite3-3.50.4-1
++	webpositive-r1~beta6_hrev99000_dirty-1
+ 	:
+ 	# source packages
+ 	bash

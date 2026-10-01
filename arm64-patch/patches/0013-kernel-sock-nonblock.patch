@@ -1,0 +1,46 @@
+Subject: [PATCH] kernel: make socket(SOCK_NONBLOCK) actually non-blocking
+
+create_socket_fd() turned SOCK_NONBLOCK into O_NONBLOCK on the file
+descriptor's open mode and nothing else. The network stack decides whether
+connect(), recv() and friends block, and it never looks at the open mode, so
+the socket stayed blocking while F_GETFL said O_NONBLOCK. fcntl(F_SETFL,
+O_NONBLOCK) did not have the problem: socket_set_flags() sends the stack
+B_SET_NONBLOCKING_IO.
+
+Found through curl, which creates its sockets with SOCK_NONBLOCK and trusts
+F_GETFL: its recv() before closing a kept-alive connection waited for the
+server's idle timeout, 30 to 400 seconds on every run. strace showed it:
+
+  socket(AF_INET, SOCK_STREAM|SOCK_NONBLOCK|SOCK_CLOEXEC, 0x6) = 0x4
+  connect(0x4, ...) = 0x0 No error (33310 us)         <- blocked
+  fcntl(0x4, F_GETFL) = 0xc2                          <- says O_NONBLOCK
+  recv(0x4, ..., 0x400, 0) = 0x0 (400021034 us)
+
+Reproduced on x86 (Sony VAIO P) and arm64 alike: a connect() to an
+unreachable address on a SOCK_NONBLOCK socket took 75 s instead of returning
+EINPROGRESS. With this change it returns at once, verified on an image built
+from this tree. accept4() and socketpair() go through the same function.
+
+diff -ru a/src/system/kernel/fs/socket.cpp b/src/system/kernel/fs/socket.cpp
+--- a/src/system/kernel/fs/socket.cpp	2026-09-30 09:39:31.143890407 +0000
++++ b/src/system/kernel/fs/socket.cpp	2026-09-30 09:39:31.144890692 +0000
+@@ -394,6 +394,19 @@
+ 		SO_NONBLOCK, &nonBlock, &nonBlockLen);
+ 	if (error != B_OK)
+ 		return error;
++	// SOCK_NONBLOCK has to reach the socket, not just the descriptor's open
++	// mode: the stack decides whether connect(), recv() and friends block,
++	// and it never looks at the open mode. Setting only O_NONBLOCK left a
++	// socket that F_GETFL reported non-blocking but that blocked anyway, so
++	// callers that trust it (curl) sat in recv() until the peer closed.
++	// fcntl(F_SETFL, O_NONBLOCK) goes through socket_set_flags(), which does
++	// the same.
++	if ((flags & SOCK_NONBLOCK) != 0 && !nonBlock) {
++		error = sStackInterface->ioctl(socket, B_SET_NONBLOCKING_IO, NULL, 0);
++		if (error != B_OK)
++			return error;
++	}
++
+ 	int oflags = 0;
+ 	if ((flags & SOCK_CLOEXEC) != 0)
+ 		oflags |= O_CLOEXEC;

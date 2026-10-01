@@ -1,0 +1,9 @@
+# Build output and runtime state -- regenerate with build-renku-arm64-iso.sh
+# and run-renku-arm64.sh rather than committing these.
+*.iso
+*.image
+*.img
+serial.log
+
+# macOS
+.DS_Store

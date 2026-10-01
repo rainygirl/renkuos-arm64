@@ -1,0 +1,41 @@
+Subject: [PATCH] media: BMediaRecorder starts the producer it records from
+
+Recording apps (R Sound Editor, R Spectrum) connected to the sound card's
+input without error and then received no buffers at all.
+
+The hda driver was fine: record interrupts arrived and the record buffer
+cycle advanced. MultiAudioNode sends record buffers only while its run
+state is B_STARTED, and it was B_STOPPED. Nobody starts it as a producer:
+the media_server starts the mixer (which drives playback on its own), and
+BMediaRecorder::Start() started only the node's time source when the node
+is one - which a sound card's node always is - and the node itself only
+otherwise.
+
+Start the producer in either case. Starting a node that already runs is
+harmless.
+
+Verified on arm64 under QEMU (intel-hda + hda-duplex): a recorder that
+got 0 buffers in 3 s now gets 16 per second, 393,216 bytes each second at
+96 kHz, 2 channels, 16 bit.
+
+diff --git a/src/kits/media/MediaRecorder.cpp b/src/kits/media/MediaRecorder.cpp
+index b4227875a1..e427379858 100644
+--- a/src/kits/media/MediaRecorder.cpp
++++ b/src/kits/media/MediaRecorder.cpp
+@@ -268,7 +268,15 @@ BMediaRecorder::Start(bool force)
+ 	if ((fOutputNode.kind & B_TIME_SOURCE) != 0)
+ 		err = BMediaRoster::CurrentRoster()->StartTimeSource(
+ 			fOutputNode, BTimeSource::RealTime());
+-	else
++
++	// A sound card's node is its own time source and also the producer we
++	// record from. Starting only the time source leaves the producer in
++	// B_STOPPED, and MultiAudioNode sends record buffers only while started:
++	// the recorder connects fine and then never receives a single buffer.
++	// Nothing else starts it (the media_server starts the mixer, which starts
++	// playback on its own), so start the producer here. Starting a node that
++	// already runs is harmless.
++	if (err == B_OK && (fOutputNode.kind & B_BUFFER_PRODUCER) != 0)
+ 		err = BMediaRoster::CurrentRoster()->StartNode(
+ 			fOutputNode, fNode->TimeSource()->Now());
+ 

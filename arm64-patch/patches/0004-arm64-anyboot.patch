@@ -1,0 +1,168 @@
+Subject: [PATCH] build: build an EFI-only anyboot image on arm64
+
+@minimum-anyboot did not build for a non-x86 EFI target, so arm64 had no
+bootable-and-installable ISO at all: the only medium was the raw .image.
+A plain @minimum-cd ISO is not a substitute, because haiku_loader has no
+iso9660 driver and so cannot read the system off a pure ISO9660 medium
+(it stops at "Boot volume is not valid"). The anyboot hybrid solves exactly
+that - the same file carries a real BFS partition the loader can read.
+
+Three things stood in the way, none of them fundamental:
+
+1. build/jam/images/AnybootImage unconditionally built base_mbr.bin from
+   src/bin/writembr/mbr.S. That is x86 assembly and BuildMBR compiles it
+   with -m32. Build it only for x86 targets. The anyboot tool's -b argument
+   is already optional, and the MBR *partition table* is written by the tool
+   itself in C - only the legacy BIOS boot code is missing without it, which
+   an EFI-only machine never executes.
+
+2. build/jam/images/CDBootImage always passed HAIKU_BOOT_FLOPPY to
+   BuildCDBootImageEFI, which handed xorriso an empty -b. Pass no BIOS
+   floppy on non-x86 and emit an ISO whose sole El Torito entry is the UEFI
+   one.
+
+3. src/tools/anyboot/anyboot.cpp only ever got an MBR boot signature as a
+   side effect of copying the BIOS boot code over sector 0. Without -b,
+   bytes 510-511 stayed zero, so firmware and boot loaders saw no partition
+   table at all - the partition entries the tool had just written were
+   ignored. Write 0x55 0xAA explicitly in that case.
+
+Verified on arm64 under QEMU (qemu-system-aarch64, hvf, edk2-aarch64,
+image attached as USB storage) on Apple Silicon. The resulting
+haiku-minimum-anyboot.iso:
+
+  MBR signature 0xaa55
+    part0  type 0xeb  bootable  offset 4194304   300.0 MiB  (BFS, "Haiku")
+    part1  type 0xef            offset 318767104   2.8 MiB  (FAT32, ESP)
+  El Torito boot img : 1 UEFI -> /esp.image
+
+boots to the Haiku desktop; DriveSetup shows the ISO's own BFS partition
+mounted at /boot; and the Installer installs from it onto a separate empty
+disk, which then boots on its own. See ../README.md for the full procedure.
+
+Known upstream quirk, not introduced here: haiku-boot-cd.iso is an
+RmTemps target, so a second @minimum-anyboot run in the same tree fails
+with "failed to open ISO file". Run `jam haiku-boot-cd` first. The TODO
+comment already in AnybootImage refers to this.
+
+diff --git a/build/jam/ImageRules b/build/jam/ImageRules
+index 52a724f86c..705cb29d7a 100644
+--- a/build/jam/ImageRules
++++ b/build/jam/ImageRules
+@@ -1614,7 +1614,13 @@ rule BuildCDBootImageEFI image : bootfloppy : bootefi : extrafiles
+ 	}
+ 
+ 	BOOTEFI on $(image) = $(bootefi) ;
+-	BuildCDBootImageEFI1 $(image) : $(bootfloppy) $(bootefi) $(extrafiles) ;
++	if $(bootfloppy) {
++		BuildCDBootImageEFI1 $(image) : $(bootfloppy) $(bootefi) $(extrafiles) ;
++	} else {
++		# No legacy BIOS boot floppy (it is x86 only): emit an ISO whose sole
++		# El Torito entry is the UEFI one.
++		BuildCDBootImageEFIOnly $(image) : $(bootefi) $(extrafiles) ;
++	}
+ }
+ 
+ actions BuildCDBootImageEFI1
+@@ -1624,6 +1630,13 @@ actions BuildCDBootImageEFI1
+ 		-r -J -V $(VOLID) -o $(<) $(>[1]) $(>[2]) $(>[3-])
+ }
+ 
++actions BuildCDBootImageEFIOnly
++{
++	$(RM) $(<)
++	xorriso -as mkisofs -e `basename $(>[1])` -no-emul-boot \
++		-r -J -V $(VOLID) -o $(<) $(>[1]) $(>[2-])
++}
++
+ 
+ #pragma mark - CD Boot PPC Image rules
+ 
+diff --git a/build/jam/images/AnybootImage b/build/jam/images/AnybootImage
+index 0dcf640996..4ca6e096a9 100644
+--- a/build/jam/images/AnybootImage
++++ b/build/jam/images/AnybootImage
+@@ -9,21 +9,37 @@ rule BuildAnybootImageEfi anybootImage : mbrPart : efiPart : isoPart : imageFile
+ 
+ 	Depends $(anybootImage) : $(anyboot) ;
+ 	Depends $(anybootImage) : $(isoPart) ;
+-	Depends $(anybootImage) : $(mbrPart) ;
+ 	Depends $(anybootImage) : $(efiPart) ;
+ 	Depends $(anybootImage) : $(imageFile) ;
+ 
+-	BuildAnybootImageEfi1 $(anybootImage) : $(anyboot) $(mbrPart) $(efiPart) $(isoPart) $(imageFile) ;
++	if $(mbrPart) {
++		Depends $(anybootImage) : $(mbrPart) ;
++		BuildAnybootImageEfi1 $(anybootImage) : $(anyboot) $(mbrPart) $(efiPart) $(isoPart) $(imageFile) ;
++	} else {
++		# Without the legacy BIOS boot stub. anyboot writes the MBR partition
++		# table itself, so EFI firmware still finds the ESP and the loader
++		# still finds the BFS partition.
++		BuildAnybootImageEfiNoBios $(anybootImage) : $(anyboot) $(efiPart) $(isoPart) $(imageFile) ;
++	}
+ }
+ 
+ actions BuildAnybootImageEfi1 {
+ 	$(2[1]) -b $(2[2]) -e $(2[3]) $(2[4]) $(2[5]) $(1)
+ }
+ 
+-local baseMBR = base_mbr.bin ;
+-local mbrSource = [ FDirName $(HAIKU_TOP) src bin writembr mbr.S ] ;
+-BuildMBR $(baseMBR) : $(mbrSource) ;
+-MakeLocate $(baseMBR) : $(HAIKU_OUTPUT_DIR) ;
++actions BuildAnybootImageEfiNoBios {
++	$(2[1]) -e $(2[2]) $(2[3]) $(2[4]) $(1)
++}
++
++# mbr.S is x86 assembly and BuildMBR compiles it with -m32, so it can only be
++# built for an x86 target. Other architectures boot through EFI alone.
++local baseMBR = ;
++if $(TARGET_ARCH) = x86 || $(TARGET_ARCH) = x86_64 {
++	baseMBR = base_mbr.bin ;
++	local mbrSource = [ FDirName $(HAIKU_TOP) src bin writembr mbr.S ] ;
++	BuildMBR $(baseMBR) : $(mbrSource) ;
++	MakeLocate $(baseMBR) : $(HAIKU_OUTPUT_DIR) ;
++}
+ MakeLocate $(HAIKU_ANYBOOT) : $(HAIKU_ANYBOOT_DIR) ;
+ 
+ # Currently the Anyboot image is available only for EFI+BIOS or BIOS-only
+diff --git a/build/jam/images/CDBootImage b/build/jam/images/CDBootImage
+index 67be3c651b..e4c6577e03 100644
+--- a/build/jam/images/CDBootImage
++++ b/build/jam/images/CDBootImage
+@@ -40,7 +40,14 @@ if $(TARGET_ARCH) = ppc {
+ 				MakeLocateDebug $(efiPartition) : system boot ;
+ 				BuildEfiSystemPartition $(efiPartition) : $(efiLoader) ;
+ 
+-				BuildCDBootImageEFI $(HAIKU_CD_BOOT_IMAGE) : $(HAIKU_BOOT_FLOPPY)
++				# The BIOS boot floppy only exists on x86; elsewhere it
++				# neither builds nor boots, and xorriso would be handed an
++				# empty -b argument.
++				local biosFloppy = $(HAIKU_BOOT_FLOPPY) ;
++				if $(TARGET_ARCH) != x86 && $(TARGET_ARCH) != x86_64 {
++					biosFloppy = ;
++				}
++				BuildCDBootImageEFI $(HAIKU_CD_BOOT_IMAGE) : $(biosFloppy)
+ 					: $(efiPartition) : $(extras) ;
+ 			}
+ 		}
+diff --git a/src/tools/anyboot/anyboot.cpp b/src/tools/anyboot/anyboot.cpp
+index bfc88133a6..0b50ee3e61 100644
+--- a/src/tools/anyboot/anyboot.cpp
++++ b/src/tools/anyboot/anyboot.cpp
+@@ -276,6 +276,15 @@ main(int argc, char *argv[])
+ 	if (biosFileHandle >= 0) {
+ 		result = copyLoop(biosFileHandle, outputFileHandle, 0);
+ 		checkError(result != 0, "failed to copy BIOS bootloader to output");
++	} else {
++		// No BIOS boot code was supplied (EFI-only targets such as arm64), so
++		// nothing has written the MBR boot signature. Without it firmware and
++		// boot loaders reject the partition table below as absent, and the
++		// image looks like a plain ISO with no partitions at all.
++		uint8_t signature[2] = { 0x55, 0xaa };
++		ssize_t written = pwrite(outputFileHandle, signature, 2,
++			kBlockSize - 2);
++		checkError(written != 2, "failed to write MBR boot signature");
+ 	}
+ 
+ 	// Haiku Image Partition

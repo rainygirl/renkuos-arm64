@@ -1,0 +1,7 @@
+name "RENKU Apps"
+vendor "RENKU"
+summary "The R* applications for RENKU"
+priority 1
+url "tag:renku-os,2026:apps"
+identifier "tag:renku-os,2026:apps"
+architecture arm64

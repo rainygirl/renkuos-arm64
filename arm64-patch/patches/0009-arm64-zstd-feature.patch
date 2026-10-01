@@ -1,0 +1,47 @@
+Subject: [PATCH] arm64: turn the zstd build feature on
+
+Every package HaikuPorts builds is zstd-compressed, ca_root_certificates
+included. build/jam/BuildFeatures enables zstd only when zstd_devel is
+available, and the arm64 bootstrap package list has no zstd at all, so the
+feature was silently off: packagefs, libbe and the boot loader were built
+without ZstdCompressionAlgorithm, and a zstd package installed into
+/boot/system/packages was never activated and said nothing about it. That
+is why the root certificates never reached /boot/system/data/ssl.
+
+This lists zstd, zstd_devel and the zstd source package under HaikuPorts'
+names and versions. They are not on HaikuPorts for arm64: the binaries are
+cross-built by haiku-rwebpositive-arm64's package-zstd-arm64.sh, and the
+source package is HaikuPorts' own architecture-"source" file. All three are
+in ../packages/ and add-media-arm64.sh copies them into the generated
+directory's download/ when it is given one.
+
+Note that jam does not track preprocessor defines: in a tree that was
+already built with the feature off, delete the objects of packagefs,
+kits/support, kits/package, bin/package, the boot loader's packagefs and
+boot libs, and kits/libbe.so before rebuilding, or they keep their old
+builds.
+
+diff --git a/build/jam/repositories/HaikuPorts/arm64 b/build/jam/repositories/HaikuPorts/arm64
+index 85ff062d54..c0ebfd501b 100644
+--- a/build/jam/repositories/HaikuPorts/arm64
++++ b/build/jam/repositories/HaikuPorts/arm64
+@@ -41,6 +41,11 @@ RemotePackageRepository HaikuPorts
+ 	texinfo-7.2_bootstrap-1
+ 	zlib-1.2.13_bootstrap-1
+ 	zlib_devel-1.2.13_bootstrap-1
++	# Not in HaikuPorts for arm64; cross-built under HaikuPorts' names so the
++	# zstd build feature turns on. Without it packagefs cannot read a
++	# zstd-compressed package, which is what every HaikuPorts package is.
++	zstd-1.5.6-2
++	zstd_devel-1.5.6-2
+ 	:
+ 	# source packages
+ 	bash
+@@ -66,6 +71,7 @@ RemotePackageRepository HaikuPorts
+ 	sed
+ 	texinfo
+ 	zlib
++	zstd
+ 	:
+ 	# debuginfo packages
+ 	;

@@ -1,0 +1,127 @@
+Subject: [PATCH] arm64: query only valid page table entries; app_server text bounds in layers
+
+Two fixes from haiku-rwebpositive-arm64, found while bringing up HaikuWebKit
+on arm64 and applicable here unchanged:
+
+- VMSAv8TranslationMap::Query no longer reports an invalid descriptor as a
+  mapping (haiku-arm64-query-valid-pte.patch).
+- PictureBoundingBoxPlayer computes a bounding box for text drawn inside a
+  layer, so layered text is no longer clipped away
+  (haiku-arm64-layer-text-bbox.patch).
+
+diff --git a/src/servers/app/PictureBoundingBoxPlayer.cpp b/src/servers/app/PictureBoundingBoxPlayer.cpp
+index f6164eb45a..2110a6f025 100644
+--- a/src/servers/app/PictureBoundingBoxPlayer.cpp
++++ b/src/servers/app/PictureBoundingBoxPlayer.cpp
+@@ -12,6 +12,7 @@
+ #include "PictureBoundingBoxPlayer.h"
+ 
+ #include <new>
++#include <math.h>
+ #include <stdio.h>
+ 
+ #include "DrawState.h"
+@@ -697,7 +698,16 @@ void
+ BoundingBoxCallbacks::SetFontShear(float shear)
+ {
+ 	ServerFont font;
+-	font.SetShear(shear);
++	// The picture stores the shear as (degrees - 90) in radians -- see
++	// PictureDataWriter's WriteSetFontShear in ServerPicture.cpp -- so a font
++	// with no shear at all arrives here as 0.0. Setting that as the shear in
++	// degrees, which is what this used to do, leaves the draw state's font at
++	// 0 degrees, and ServerFont::EmbeddedTransformation then computes
++	// tan((90 - 0) degrees), which is 1.6e16. Every glyph x coordinate in the
++	// bounding box comes out around 1e17 after that, while y stays correct,
++	// because the skew only feeds x. CanvasCallbacks::SetFontShear already
++	// converts; this is the same conversion.
++	font.SetShear(shear * (180 / M_PI) + 90);
+ 	fState->GetDrawState()->SetFont(font, B_FONT_SHEAR);
+ }
+ 
+@@ -895,9 +905,60 @@ void
+ BoundingBoxCallbacks::DrawStringLocations(const char* string, size_t length,
+ 	const BPoint locations[], size_t locationCount)
+ {
+-	// TODO
+-}
++	TRACE_BB("%p string locations (%ld locations)\n", fState, locationCount);
++
++	// Without this, text drawn with per-glyph locations contributes nothing to
++	// a layer's bounding box. A layer holding only such text then gets an
++	// invalid box, Layer::RenderToBitmap returns NULL, and the whole layer is
++	// dropped; a layer holding text plus one other shape gets a box covering
++	// only the shape. That is what made every element with opacity < 1
++	// invisible in WebPositive, which draws all of its text through
++	// BView::DrawString(const char*, const BPoint[], int32).
++
++	if (locationCount == 0 || string == NULL || length == 0)
++		return;
++
++	ServerFont font = fState->GetDrawState()->Font();
++
++	int32 numChars = (int32)locationCount;
++	BStackOrHeapArray<BRect, 64> boxes(numChars);
++	if (!boxes.IsValid())
++		return;
+ 
++	// A glyph with no outline -- a space -- is reported through
++	// ConsumeEmptyGlyph, which writes nothing into the array, so the entries
++	// have to start out recognisably empty or the union picks up whatever the
++	// stack held.
++	for (int32 i = 0; i < numChars; i++)
++		boxes[i] = BRect(0, 0, -1, -1);
++
++	escapement_delta delta = { 0.0, 0.0 };
++	if (font.GetBoundingBoxes(string, (int32)length, numChars, boxes, false,
++			B_SCREEN_METRIC, delta, false) != B_OK) {
++		return;
++	}
++
++	// The boxes come back relative to each glyph's own origin.
++	BRect rect(0, 0, -1, -1);
++	for (int32 i = 0; i < numChars; i++) {
++		if (!boxes[i].IsValid())
++			continue;
++		BRect box = boxes[i].OffsetByCopy(locations[i]);
++		rect = rect.IsValid() ? (rect | box) : box;
++	}
++	if (!rect.IsValid())
++		return;
++
++	// A pixel of slack for antialiasing, which reaches outside the glyph box.
++	rect.InsetBy(-1, -1);
++
++	fState->PenToLocalTransform().Apply(&rect);
++	fState->IncludeRect(rect);
++
++	BPoint location = locations[locationCount - 1];
++	fState->PenToLocalTransform().Apply(&location);
++	fState->GetDrawState()->SetPenLocation(location);
++}
+ 
+ void
+ BoundingBoxCallbacks::SetFillRule(int32 fillRule)
+diff --git a/src/system/kernel/arch/arm64/VMSAv8TranslationMap.cpp b/src/system/kernel/arch/arm64/VMSAv8TranslationMap.cpp
+index dd44ebdc86..5d90ec0b95 100644
+--- a/src/system/kernel/arch/arm64/VMSAv8TranslationMap.cpp
++++ b/src/system/kernel/arch/arm64/VMSAv8TranslationMap.cpp
+@@ -757,6 +757,18 @@ VMSAv8TranslationMap::Query(addr_t va, phys_addr_t* pa, uint32* flags)
+ 	ProcessRange(fPageTable, fInitialLevel, va, B_PAGE_SIZE, nullptr,
+ 		[=](uint64_t* ptePtr, uint64_t effectiveVa) {
+ 			uint64_t pte = atomic_get64((int64_t*)ptePtr);
++
++			// ProcessRange() hands over the slot for this address whether or
++			// not anything is mapped there. Reporting PAGE_PRESENT for an
++			// empty entry told the caller a page lives at physical address 0:
++			// set_memory_protection() then looked that up and panicked with
++			// "looking up page failed for pa 0x0". Every other Unmap/Protect
++			// path in this file tests kPteValidMask first; only Query() did
++			// not. It takes a guarded-heap allocation, which protects pages
++			// it has reserved but never touched, to walk into it.
++			if ((pte & kPteValidMask) == 0)
++				return;
++
+ 			*pa = pte & kPteAddrMask;
+ 			*flags |= PAGE_PRESENT | B_KERNEL_READ_AREA;
+ 			if (is_pte_accessed(pte))
