@@ -49,12 +49,12 @@ reuses it and takes much less time.
 
 ## Installing to the disk
 
-Do this before plain `./run-renku-arm64.sh`: on a fresh checkout there is
+Do this before plain `./run-qemu-renku-arm64.sh`: on a fresh checkout there is
 nothing installed yet, so booting without `--install` first just creates an
 empty disk with no OS on it.
 
 ```sh
-./run-renku-arm64.sh --install
+./run-qemu-renku-arm64.sh --install
 ```
 
 boots the ISO with an (empty) disk attached, created automatically the
@@ -80,7 +80,7 @@ first time. Then, inside the guest:
    a corrupted system package on the *next* boot. A normal shutdown avoids
    it entirely, and this port powers QEMU off by itself when you do.
 
-After that, `./run-renku-arm64.sh` (no `--install`) boots the installed
+After that, `./run-qemu-renku-arm64.sh` (no `--install`) boots the installed
 disk directly. `--headless` drops the window (serial console only); the
 disk (`renku-arm64-vm.img`) persists between runs either way.
 

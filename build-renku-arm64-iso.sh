@@ -232,5 +232,5 @@ mkdir -p "$(dirname "$OUTPUT_ISO")"
 "$DOCKER" exec "$CONTAINER_NAME" rm -f "$ISO_IN_CONTAINER"
 
 log "Built: $OUTPUT_ISO ($(du -h "$OUTPUT_ISO" | cut -f1))"
-echo "Boot it with:      ./run-renku-arm64.sh --install"
+echo "Boot it with:      ./run-qemu-renku-arm64.sh --install"
 echo "Or write to a USB stick:  sudo dd if=$OUTPUT_ISO of=/dev/rdiskN bs=4m"

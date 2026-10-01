@@ -3,11 +3,11 @@
 # Boot RenkuOS arm64 in QEMU, on Apple Silicon (hvf) or under emulation.
 #
 # Usage:
-#   ./run-renku-arm64.sh                boot the installed disk, in a window
-#   ./run-renku-arm64.sh --install      boot the ISO with the disk attached,
+#   ./run-qemu-renku-arm64.sh                boot the installed disk, in a window
+#   ./run-qemu-renku-arm64.sh --install      boot the ISO with the disk attached,
 #                                       to partition and install with it
-#   ./run-renku-arm64.sh --headless     no window; QMP control socket only
-#   ./run-renku-arm64.sh --tcg          force emulation over hvf
+#   ./run-qemu-renku-arm64.sh --headless     no window; QMP control socket only
+#   ./run-qemu-renku-arm64.sh --tcg          force emulation over hvf
 #
 # The disk (renku-arm64-vm.img, created empty on first run) persists between
 # runs. The installer medium is renku-arm64.iso, built by

@@ -3,7 +3,36 @@
 [English](AGENTS.md)
 
 `README.md`에 없는 것들: 빌드가 어떻게 돌아가는지, 패치가 뭘 하는지, 손대기
-전에 알아둘 함정들.
+전에 알아둘 함정들. AI 에이전트로서 이 디렉터리에서 작업 중이라면, 이
+파일이 곧 당신의 CLAUDE.md입니다 -- CLAUDE.md는 이제 여기를 가리키는
+포인터일 뿐입니다.
+
+## 명령어
+
+여기 스크립트는 정확히 두 개뿐입니다. 그 외엔 없음 -- 세 번째가 보이면
+그건 스크래치 작업물이고 남아있으면 안 됩니다.
+
+```sh
+./build-renku-arm64-iso.sh              # -> ./renku-arm64.iso
+SKIP_CROSS_TOOLS=1 ./build-renku-arm64-iso.sh   # 캐시된 툴체인 재사용
+```
+
+"부팅해줘", "실행해줘", "QEMU 켜줘" 같은 요청을 받으면:
+
+```sh
+./run-qemu-renku-arm64.sh                # 설치된 디스크를 창으로 부팅
+./run-qemu-renku-arm64.sh --install      # 디스크를 붙인 채로 ISO 부팅
+./run-qemu-renku-arm64.sh --headless     # 창 없이
+```
+
+`qemu-system-aarch64` 명령줄을 직접 조립하지 마세요. `run-qemu-renku-arm64.sh`가
+이 포팅에 필요한 것들을 이미 고정해뒀습니다 -- USB로 붙인 디스크(QEMU의
+edk2-aarch64 펌웨어는 SATA 드라이버가 없어서 AHCI는 안 보이고 UEFI
+Shell로 떨어짐), 설치 매체와 타겟 디스크를 분리된 xhci 컨트롤러에
+연결(한 컨트롤러에 네 개 달면 게스트 USB 키보드/태블릿이 깨짐), hvf에서
+`-cpu host` -- 이 중 하나라도 틀리면 명확한 에러가 아니라 행이나 입력
+안 되는 컨트롤러가 됩니다. 디스크(`renku-arm64-vm.img`)는 실행마다
+그대로 남습니다.
 
 ## 패치
 
@@ -118,3 +147,5 @@ Media Foundation, HolePunch 미디어 엔진은 등록하는데 Haiku용은 하�
 - **설치**(DriveSetup -> Installer -> EFI 로더 복사 -> 정상 종료 -> 설치된
   디스크만 붙여서 재부팅): WebPositive까지 포함한 완전한 데스크탑으로
   부팅, 처음부터 끝까지 확인.
+- **R\* 앱**: 부팅 후 호스팅된 저장소(https://pkgman.rainygirl.com/arm64)에서
+  `pkgman`으로 설치 -- ISO에 미리 들어있진 않음.

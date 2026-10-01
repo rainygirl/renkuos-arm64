@@ -3,7 +3,36 @@
 [한국어](AGENTS.ko.md)
 
 What `README.md` doesn't cover: how the build works, what the patches do,
-and traps worth knowing before touching any of it.
+and traps worth knowing before touching any of it. If you're an AI agent
+working in this directory, this file *is* your CLAUDE.md -- that file is
+now just a pointer here.
+
+## Commands
+
+There are exactly two scripts here. Nothing else -- if a third one shows
+up, it is scratch work that should not still be around.
+
+```sh
+./build-renku-arm64-iso.sh              # -> ./renku-arm64.iso
+SKIP_CROSS_TOOLS=1 ./build-renku-arm64-iso.sh   # reuse a cached toolchain
+```
+
+When asked to "boot it", "run it", or "start QEMU":
+
+```sh
+./run-qemu-renku-arm64.sh                # boot the installed disk, in a window
+./run-qemu-renku-arm64.sh --install      # boot the ISO with the disk attached
+./run-qemu-renku-arm64.sh --headless     # no window
+```
+
+Do not hand-assemble a `qemu-system-aarch64` command line. `run-qemu-renku-arm64.sh`
+already pins what the port requires -- disks attached over USB (QEMU's
+edk2-aarch64 firmware has no SATA driver, so AHCI is invisible to it and
+the machine drops to the UEFI Shell), the installer medium and the target
+disk on separate xhci controllers (four devices on one controller breaks
+the guest's USB keyboard/tablet), `-cpu host` under hvf -- and getting any
+of them wrong produces a hang or a controller with no working input, not a
+clear error. The disk (`renku-arm64-vm.img`) persists between runs.
 
 ## The patch
 
@@ -122,3 +151,5 @@ reinvestigating here.)
 - **Install** (DriveSetup -> Installer -> copy EFI loader -> clean
   shutdown -> reboot with only the installed disk attached): boots to a
   full desktop with WebPositive present, confirmed end to end.
+- **R\* apps**: install via `pkgman` from the hosted repository,
+  https://pkgman.rainygirl.com/arm64, after boot -- not baked into the ISO.

@@ -50,12 +50,12 @@ SKIP_CROSS_TOOLS=1 ./build-renku-arm64-iso.sh
 
 ## 디스크에 설치하기
 
-`./run-renku-arm64.sh`를 그냥 실행하기 전에 이것부터 하세요: 막 받은
+`./run-qemu-renku-arm64.sh`를 그냥 실행하기 전에 이것부터 하세요: 막 받은
 상태엔 아직 아무것도 설치돼 있지 않아서, `--install` 없이 먼저 부팅하면
 OS가 하나도 없는 빈 디스크만 만들어집니다.
 
 ```sh
-./run-renku-arm64.sh --install
+./run-qemu-renku-arm64.sh --install
 ```
 
 (빈) 디스크를 붙인 채로 ISO를 부팅합니다 -- 디스크는 처음 실행할 때 자동으로
@@ -80,7 +80,7 @@ OS가 하나도 없는 빈 디스크만 만들어집니다.
    있습니다. 정상 종료하면 이 문제가 아예 안 생기고, 이 포팅은 정상
    종료 시 QEMU도 알아서 꺼집니다.
 
-그 다음부터는 `./run-renku-arm64.sh`(`--install` 없이)로 설치된 디스크를
+그 다음부터는 `./run-qemu-renku-arm64.sh`(`--install` 없이)로 설치된 디스크를
 바로 부팅합니다. `--headless`는 창 없이 시리얼 콘솔만 씁니다. 디스크
 (`renku-arm64-vm.img`)는 어느 쪽이든 계속 남습니다.
 
