@@ -35,7 +35,7 @@ clear error. The disk (`renku-arm64-vm.img`) persists between runs.
 
 ## The patch
 
-`arm64-patch/patches/` is 16 patches against RenkuOS/Source, applied by
+`arm64-patch/patches/` is 17 patches against RenkuOS/Source, applied by
 `build-renku-arm64-iso.sh`. What each one changes and why is documented
 file-by-file in [`arm64-patch/README.md`](arm64-patch/README.md) -- this
 section only summarizes the shape of it.

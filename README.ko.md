@@ -25,7 +25,7 @@ arm64 포팅 자체를 패치하는 건 없습니다. 이 디렉터리가 더하
 | R Chromium | 필요한 커널 수정이 없음 | 포함됨 |
 | SSH | HaikuPorts arm64에 아예 없음 | `sshd`가 부팅 시 실행됨 |
 
-16개 패치 각각이 정확히 무엇을 바꾸고 왜 그런지는
+17개 패치 각각이 정확히 무엇을 바꾸고 왜 그런지는
 [`AGENTS.md`](AGENTS.md)와 [`arm64-patch/README.md`](arm64-patch/README.ko.md)에
 있습니다.
 

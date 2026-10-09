@@ -41,7 +41,7 @@ SKIP_CROSS_TOOLS=1 ./build-renku-arm64-iso.sh   # 캐시된 툴체인 재사용
 
 ## 패치
 
-`arm64-patch/patches/`에는 RenkuOS/Source에 적용하는 패치 16개가 있고,
+`arm64-patch/patches/`에는 RenkuOS/Source에 적용하는 패치 17개가 있고,
 `build-renku-arm64-iso.sh`가 빌드할 때마다 자동으로 적용합니다. 각 패치가
 정확히 뭘 바꾸고 왜 그런지는
 [`arm64-patch/README.ko.md`](arm64-patch/README.ko.md)에 파일 단위로 자세히

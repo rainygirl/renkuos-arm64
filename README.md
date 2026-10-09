@@ -25,7 +25,7 @@ architecture, plus a few fixes that only bite on arm64:
 | R Chromium | Missing kernel fixes it needs | Included |
 | SSH | Not on HaikuPorts for arm64 at all | `sshd` runs at boot |
 
-The technical detail -- exactly what each of the 16 patches changes and
+The technical detail -- exactly what each of the 17 patches changes and
 why -- is in [`AGENTS.md`](AGENTS.md) and [`arm64-patch/README.md`](arm64-patch/README.md).
 
 ## Requirements
