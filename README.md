@@ -24,7 +24,7 @@ architecture, plus a few fixes that only bite on arm64:
 | Korean / Japanese / Chinese text | Draws as empty boxes | A bundled font covers it |
 | R Chromium | Missing kernel fixes it needs | Included |
 
-The technical detail -- exactly what each of the 14 patches changes and
+The technical detail -- exactly what each of the 15 patches changes and
 why -- is in [`AGENTS.md`](AGENTS.md) and [`arm64-patch/README.md`](arm64-patch/README.md).
 
 ## Requirements
@@ -70,7 +70,7 @@ first time. Then, inside the guest:
    (the Installer does not do this step):
    ```sh
    mountvolume -all
-   cp -r "/haiku esp/EFI" "/esp/"
+   cp -r "/haiku esp/EFI" "/efi/"
    sync
    ```
 4. **Shut the guest down properly** -- Deskbar menu > Shutdown > Power

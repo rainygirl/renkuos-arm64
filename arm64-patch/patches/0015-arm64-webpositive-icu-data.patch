@@ -1,0 +1,53 @@
+Subject: [PATCH] arm64: point WebKit's ICU at the full break-iterator data
+
+arm64 has no HaikuPorts-built icu74 yet (see 0014's note on openssl3), so
+every package here -- bootstrap or not -- uses the bootstrap-profile icu74
+package. Its lib/libicudata.so.74 turns out to be a stub: ~130 KiB, versus
+the ~30 MiB data/icu/74.1/icudt74l.dat shipped right alongside it in the
+same package and never loaded by anything by default. The stub still
+exports the icudt74_dat symbol, so most ICU use (collation, number
+formatting) works -- but WebKit's break iterators need real locale and
+break-rule resources from that data, and WTF::TextBreakIteratorICU's
+constructor crashes the process when ubrk_open() fails even with an empty
+("root") locale, which the stub can't satisfy:
+
+    WTF::TextBreakIteratorICU::TextBreakIteratorICU(WTF::StringView, ...)
+    RELEASE_ASSERT(m_iterator); / RELEASE_ASSERT(U_SUCCESS(status));
+
+debug_server then kills the whole team. In practice this fires on any page
+whose layout needs real text measurement -- opening google.com in
+WebPositive reproduces it every time (flexbox + ComplexTextController +
+ubrk_open for UBRK_LINE), confirmed via the debugger stack trace in the
+serial log.
+
+ICU_DATA is ICU's own documented override: point it at a directory holding
+icudt<ver><endian>.dat and ICU reads from there for anything the loaded
+common library can't supply. The real data is already on disk -- this just
+tells ICU to use it. data/system/boot/SetupEnvironment is `env`-sourced by
+the `desktop` target in data/launch/user, so everything launched from
+Deskbar/Tracker (WebPositive included) inherits it; gated on `uname -m`
+so it's a no-op on any architecture that isn't missing a real icu74.
+
+--- a/data/system/boot/SetupEnvironment
++++ b/data/system/boot/SetupEnvironment
+@@ -26,6 +26,20 @@
+ export BEINCLUDES
+ export BE_HOST_CPU
+ 
++if [ "`uname -m`" = "arm64" ] && [ -f /boot/system/data/icu/74.1/icudt74l.dat ]; then
++	# arm64 has no HaikuPorts-built icu74 yet, so the image ships the
++	# bootstrap-profile icu74 package instead. Its libicudata.so.74 is a
++	# near-empty stub (~130 KiB) -- missing locale and break-iterator data
++	# that WebKit relies on (ubrk_open() for text layout) -- while the full
++	# ~30 MiB dataset ships right alongside it as a loose .dat file nothing
++	# loads by default. ICU_DATA tells ICU to read from that file instead.
++	# Without it, WebPositive calls RELEASE_ASSERT(U_SUCCESS(status)) in
++	# WTF::TextBreakIteratorICU and the process is killed by debug_server
++	# on any page complex enough to need a real break iterator (e.g. a
++	# flexbox layout with text -- google.com, reliably).
++	export ICU_DATA=/boot/system/data/icu/74.1
++fi
++
+ if [ "$SAFEMODE" != "yes" ]; then
+ 	export PATH=.:$HOME/config/non-packaged/bin:$HOME/config/bin:$HOME/config/apps:/boot/system/non-packaged/bin:/bin:/boot/system/apps:/boot/system/preferences
+ 	export LIBRARY_PATH="%A/lib:$HOME/config/non-packaged/lib:$HOME/config/lib:/boot/system/non-packaged/lib:/boot/system/lib"

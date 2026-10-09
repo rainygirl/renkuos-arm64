@@ -35,7 +35,7 @@ Shell로 떨어짐), 설치 매체와 타겟 디스크를 분리된 xhci 컨트�
 
 ## 패치
 
-`arm64-patch/patches/`는 RenkuOS/Source에 대한 14개 패치이고,
+`arm64-patch/patches/`는 RenkuOS/Source에 대한 15개 패치이고,
 `build-renku-arm64-iso.sh`가 적용합니다. 각각이 정확히 뭘 바꾸고 왜 그런지는
 [`arm64-patch/README.ko.md`](arm64-patch/README.ko.md)에 파일 단위로
 문서화돼 있습니다 -- 이 절은 전체 모양만 요약합니다.

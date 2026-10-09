@@ -75,7 +75,10 @@ fi
 
 MEDIA=()
 if [ "$INSTALL" = "1" ]; then
-	[ -f "$ISO" ] || { echo "installer medium not found: $ISO -- run ./build-renku-arm64-iso.sh first" >&2; exit 1; }
+	if [ ! -f "$ISO" ]; then
+		echo "installer medium not found: $ISO -- building it now (this can take a while)" >&2
+		"$DIR/build-renku-arm64-iso.sh"
+	fi
 	# ISO first (boots), target disk on its own controller.
 	MEDIA=(-drive file="$ISO",if=none,id=drv0,format=raw
 	       -device usb-storage,bus=usb.0,drive=drv0
