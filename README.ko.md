@@ -23,8 +23,9 @@ arm64 포팅 자체를 패치하는 건 없습니다. 이 디렉터리가 더하
 | 설치 가능한 매체 | `@minimum-anyboot`가 arm64에서 아예 빌드 안 됨 | 빌드되고, 부팅되고, 디스크에 설치까지 됨 |
 | 한글/일본어/중국어 | 빈 네모로 나옴 | 번들된 폰트로 표시됨 |
 | R Chromium | 필요한 커널 수정이 없음 | 포함됨 |
+| SSH | HaikuPorts arm64에 아예 없음 | `sshd`가 부팅 시 실행됨 |
 
-15개 패치 각각이 정확히 무엇을 바꾸고 왜 그런지는
+16개 패치 각각이 정확히 무엇을 바꾸고 왜 그런지는
 [`AGENTS.md`](AGENTS.md)와 [`arm64-patch/README.md`](arm64-patch/README.ko.md)에
 있습니다.
 
@@ -70,7 +71,7 @@ OS가 하나도 없는 빈 디스크만 만들어집니다.
    (Installer가 EFI에서는 이 단계를 자동으로 안 해줍니다):
    ```sh
    mountvolume -all
-   cp -r "/haiku esp/EFI" "/esp/"
+   cp -r "/haiku esp/EFI" "/efi/"
    sync
    ```
 4. QEMU 창을 닫거나 다른 방식으로 끄기 전에 **게스트 안에서 정상적으로
@@ -83,6 +84,18 @@ OS가 하나도 없는 빈 디스크만 만들어집니다.
 그 다음부터는 `./run-qemu-renku-arm64.sh`(`--install` 없이)로 설치된 디스크를
 바로 부팅합니다. `--headless`는 창 없이 시리얼 콘솔만 씁니다. 디스크
 (`renku-arm64-vm.img`)는 어느 쪽이든 계속 남습니다.
+
+## SSH
+
+`sshd`가 부팅 시 실행됩니다. 스크립트가 이미 호스트 포트를 연결해뒀습니다:
+
+```sh
+ssh -p 2222 baron@127.0.0.1
+```
+
+`~/config/settings/ssh/authorized_keys`(Haiku의 `~/.ssh`에 해당)에 키를
+넣어두면 됩니다. 비밀번호 로그인은 안 됩니다 -- 이유는
+[`arm64-patch/README.md`](arm64-patch/README.ko.md) 참고.
 
 ## 알려진 한계
 

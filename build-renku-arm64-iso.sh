@@ -159,6 +159,13 @@ git -C haiku reset --quiet --hard FETCH_HEAD
 git -C haiku clean -qfdx -e generated.arm64
 git -C haiku log -1 --oneline
 
+# Haiku's CDN hosts every package this repository file ever declared under a
+# path keyed by this file's own SHA256 -- captured now, before the patches
+# below change it, because that's the checksum those packages were actually
+# published under. Used later to re-fetch any of them missing from
+# download/ (see "Staging generic bootstrap packages" below).
+PRISTINE_REPO_SHA256="$(sha256sum haiku/build/jam/repositories/HaikuPorts/arm64 | cut -d' ' -f1)"
+
 # jam builds itself via a plain Makefile into buildtools/jam/bin.<platform>,
 # named by `uname` at build time -- not worth hardcoding.
 JAM="$(find buildtools/jam -maxdepth 2 -type f -name jam -perm -u+x 2>/dev/null | head -1)"
@@ -187,6 +194,102 @@ GEN="$WORK_DIR/generated.arm64"
 mkdir -p "$GEN/download"
 cp -f /root/arm64-patch/packages/*.hpkg "$GEN/download/"
 log "Staged $(ls /root/arm64-patch/packages/*.hpkg | wc -l | tr -d ' ') packages into download/"
+
+# ---------------------------------------------------------------------------
+log "Staging generic bootstrap packages HaikuPorts doesn't mirror after HAIKU_NO_DOWNLOADS"
+# ---------------------------------------------------------------------------
+# download/ needs every package the (now patched) repository file declares,
+# not just arm64-patch's own (those were just staged above). The rest --
+# plain upstream bootstrap packages like freetype, ncurses6, gcc -- are
+# expected to already be sitting in download/ from some earlier build, since
+# nothing commits them to this repo (they're generic, not this port's own).
+# A fresh container or a fresh machine won't have them, and HAIKU_NO_DOWNLOADS=1
+# makes AddRepositoryPackage drop anything missing without even an error
+# (see 0014's note on the openssl3 gap) -- so re-fetch whatever's missing
+# here, loudly, before that silent failure has a chance to happen three jam
+# stages later. Haiku's CDN hosts them under $PRISTINE_REPO_SHA256, the
+# repository file's own checksum from before patching (see above) -- that's
+# the checksum they were actually published under.
+python3 - "$GEN/download" "$PRISTINE_REPO_SHA256" <<'PYEOF'
+import re, subprocess, sys, urllib.request, urllib.error
+from pathlib import Path
+
+download_dir, pristine_sha = Path(sys.argv[1]), sys.argv[2]
+repo_file = Path("haiku/build/jam/repositories/HaikuPorts/arm64")
+# Comments stripped first, on the whole file -- some of them contain a ';'
+# of their own (prose, not jam syntax), and finding the rule's terminating
+# ';' before stripping those grabs the first one inside a comment instead,
+# truncating the package list right before whatever got patched in last.
+no_comments = "\n".join(line.split("#", 1)[0] for line in repo_file.read_text().splitlines())
+
+start = no_comments.index("RemotePackageRepository HaikuPorts") + len("RemotePackageRepository HaikuPorts")
+end = no_comments.index(";", start)
+body = no_comments[start:end]
+
+# jam's own grammar treats ':' as a field separator only as its own
+# whitespace-delimited token -- not naive str.split(":"), which also cuts
+# the "://" inside the baseurl field and shifts every field after it.
+raw_tokens = re.findall(r"\S+", body)
+fields = [[]]
+for tok in raw_tokens:
+	if tok == ":":
+		fields.append([])
+	else:
+		fields[-1].append(tok)
+if len(fields) < 5:
+	print("WARN: unrecognized repository file shape, skipping auto-fetch", file=sys.stderr)
+	sys.exit(0)
+
+wanted = [(name, "any") for name in fields[3]] + [(name, "arm64") for name in fields[4]]
+
+# Source packages (field 5) are listed as bare names with no version of
+# their own -- jam wants at least zlib_source (zlib's build feature pulls
+# its own source in), and HaikuPorts publishes each as "<name>_source" at
+# the *same* version as the matching binary package, so borrow that.
+if len(fields) > 5:
+	versions = {}
+	for entry, _ in wanted:
+		n, v = entry.split("-", 1)
+		versions[n] = v
+	for name in fields[5]:
+		version = versions.get(name)
+		if version is None:
+			continue
+		wanted.append((f"{name}_source-{version}", "source"))
+
+base = f"https://eu.hpkg.haiku-os.org/haikuports/master/build-packages/{pristine_sha}/packages"
+fetched, failed = [], []
+for entry, arch in wanted:
+	if "-" not in entry:
+		continue
+	name, version = entry.split("-", 1)
+	filename = f"{name}-{version}-{arch}.hpkg"
+	if (download_dir / filename).exists():
+		continue
+	url = f"{base}/{filename}"
+	try:
+		with urllib.request.urlopen(url, timeout=30) as resp, \
+				open(download_dir / filename, "wb") as out:
+			out.write(resp.read())
+		if (download_dir / filename).stat().st_size < 4 or \
+				open(download_dir / filename, "rb").read(4) != b"hpkg":
+			(download_dir / filename).unlink()
+			raise ValueError("not an hpkg file")
+		fetched.append(filename)
+	except Exception as e:
+		failed.append(filename)
+		(download_dir / filename).unlink(missing_ok=True)
+		print(f"WARN: could not fetch {filename}: {e}", file=sys.stderr)
+
+if fetched:
+	print(f"fetched {len(fetched)} missing bootstrap package(s): {', '.join(fetched)}")
+if failed:
+	print(f"WARN: {len(failed)} package(s) still missing from download/ -- "
+		f"the build may fail later with a clearer error: {', '.join(failed)}",
+		file=sys.stderr)
+if not fetched and not failed:
+	print("all declared packages already present in download/")
+PYEOF
 
 # ---------------------------------------------------------------------------
 log "Building the arm64 cross-toolchain"

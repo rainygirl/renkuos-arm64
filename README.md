@@ -23,8 +23,9 @@ architecture, plus a few fixes that only bite on arm64:
 | Installable medium | `@minimum-anyboot` does not build for arm64 at all | Builds, boots, and installs to a disk |
 | Korean / Japanese / Chinese text | Draws as empty boxes | A bundled font covers it |
 | R Chromium | Missing kernel fixes it needs | Included |
+| SSH | Not on HaikuPorts for arm64 at all | `sshd` runs at boot |
 
-The technical detail -- exactly what each of the 15 patches changes and
+The technical detail -- exactly what each of the 16 patches changes and
 why -- is in [`AGENTS.md`](AGENTS.md) and [`arm64-patch/README.md`](arm64-patch/README.md).
 
 ## Requirements
@@ -83,6 +84,18 @@ first time. Then, inside the guest:
 After that, `./run-qemu-renku-arm64.sh` (no `--install`) boots the installed
 disk directly. `--headless` drops the window (serial console only); the
 disk (`renku-arm64-vm.img`) persists between runs either way.
+
+## SSH
+
+`sshd` starts at boot. The script already forwards a host port to it:
+
+```sh
+ssh -p 2222 baron@127.0.0.1
+```
+
+works with a key in `~/config/settings/ssh/authorized_keys` (Haiku's
+`~/.ssh` equivalent). Password login does not work -- see
+[`arm64-patch/README.md`](arm64-patch/README.md) for why.
 
 ## Known limitations
 

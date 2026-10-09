@@ -81,6 +81,7 @@ in the image rather than worked around in it:
 | `0013-kernel-sock-nonblock` | `socket(SOCK_NONBLOCK)` marked only the fd O_NONBLOCK and left the socket blocking; curl sat in `recv()` for the server's idle timeout (30-400 s) on every run. The stack is now told, as `fcntl(F_SETFL)` already did. |
 | `0014-minimum-webpositive` | WebPositive was not in the image at all: `@minimum-mmc` never builds it (needs `haikuwebkit_devel`, a full browser engine to link against) and `@minimum-anyboot` inherits the same definition. Ships the already-built `webpositive` package instead, the same way 0012 ships prebuilt curl/wget rather than compiling them. Needs `packages/haikuwebkit`, `sqlite3`, `dav1d`, `libavif1.0` and `noto_sans_cjk_kr` alongside it. Also declares `openssl3`/`openssl3_devel` in the arm64 repository list, which turned out to be missing entirely: 0008 already lists `openssl3` in `AddHaikuImageSystemPackages`, but nothing had ever declared a matching repository entry, so `AddRepositoryPackage` silently dropped it under `HAIKU_NO_DOWNLOADS=1` (no error -- it just isn't in the local index) and the dependency solver had nothing to offer `haikuwebkit`'s `lib:libcrypto` requirement. It worked before only because some earlier build's `download/` had the hpkg in it by hand, never captured in a patch. |
 | `0015-arm64-webpositive-icu-data` | WebPositive crashed opening any page needing real text layout (google.com, reliably): `WTF::TextBreakIteratorICU`'s constructor calls `RELEASE_ASSERT` when ICU's `ubrk_open()` fails, and it failed even for the empty/root locale. Cause: arm64's bootstrap-profile `icu74` package ships a `libicudata.so.74` that is a ~130 KiB stub, not the ~30 MiB dataset WebKit needs for break iteration -- that full dataset sits unused right next to it as a loose `data/icu/74.1/icudt74l.dat`. Fix: `data/system/boot/SetupEnvironment` now exports `ICU_DATA` at that path on arm64, which is ICU's own documented override for exactly this. |
+| `0016-arm64-openssh` | arm64 had no `ssh`/`sshd` at all -- not even on HaikuPorts' real (non-bootstrap) arm64 repository, which is empty. `packages/openssh-10.4p1-1-arm64.hpkg` is cross-built the same way 0012's curl/wget are, using HaikuPorts' own net-misc/openssh patchset, minus libedit (not in the arm64 package set; only gives sftp line-editing). Starts at boot via `data/launch/sshd` (a `job`/`service` pair, after `data/system/boot/SshdKeygen` generates host keys), both newly registered in `build/jam/packages/Haiku` alongside `SetupEnvironment`/`data/launch/system`/`user`, the only way files under `data/` actually ship. The service launches through `/bin/sh -c "sshd -D"` rather than a direct `launch` -- settled by hitting the failure: direct launch leaves sshd running and listening by its own debug log, yet refuses every connection, and going through one layer of `sh -c` fixes it every time; not root-caused inside launch_daemon. |
 
 ## Use
 
@@ -213,6 +214,24 @@ rebuilding the `haikuwebkit`/`haikuwebkit_devel` packages, which is a
 separate undertaking from this image. (Found and being fixed for x86 in a
 parallel session; worth checking whether that fix reached 1.10.0 before
 reinvestigating here.)
+
+## Known limitation: SSH password authentication
+
+`ssh`/`sshd` work -- key-based login verified end to end, host machine to
+guest, through the `hostfwd=tcp::2222-:22` `run-qemu-renku-arm64.sh` already
+sets up. Password authentication does not: every password is rejected,
+confirmed with `sshd -d -d -d` showing `mm_answer_authpassword: sending
+result 0` for a password just set with `passwd` seconds earlier.
+
+Cause: Haiku's own `crypt()` (`src/system/libroot/posix/crypt/crypt.cpp`)
+uses a Haiku-specific scrypt-based hash (`$s$<n>$<salt>$<hash>`), and its
+actual password store is a registrar service reached by BMessage, not a
+POSIX shadow file -- `getspnam()` is a compatibility shim over that, not a
+real file read. OpenSSH's password path (`auth-passwd.c` /
+`openbsd-compat/xcrypt.c`) is written for the POSIX shadow-file model, and
+the mismatch is deep enough that it is not a one-line fix; not attempted
+here. Key-based login is unaffected and is the supported way in with this
+image.
 
 ## License
 

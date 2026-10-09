@@ -79,6 +79,7 @@ Launching x-vnd.haiku-media_server failed: No such file or directory
 | `0013-kernel-sock-nonblock` | `socket(SOCK_NONBLOCK)` 이 fd 에만 O_NONBLOCK 을 표시하고 소켓은 차단 모드로 남겼습니다. curl 은 매번 서버의 유휴 제한(30~400초)까지 `recv()` 에서 기다렸습니다. 이제 `fcntl(F_SETFL)` 처럼 스택에도 알립니다. |
 | `0014-minimum-webpositive` | WebPositive가 이미지에 아예 없었습니다: `@minimum-mmc`는 절대 빌드하지 않고(브라우저 엔진 전체를 링크해야 하는 `haikuwebkit_devel`이 필요), `@minimum-anyboot`도 같은 정의를 물려받습니다. 0012가 curl/wget을 컴파일 대신 미리 빌드된 걸로 넣듯, 이미 빌드된 `webpositive` 패키지를 그대로 넣습니다. `packages/`의 `haikuwebkit`, `sqlite3`, `dav1d`, `libavif1.0`, `noto_sans_cjk_kr`도 함께 필요합니다. 또한 arm64 저장소 목록에 `openssl3`/`openssl3_devel`을 선언하는데, 이게 통째로 빠져 있었습니다: 0008이 이미 `AddHaikuImageSystemPackages`에 `openssl3`을 넣지만, 매칭되는 저장소 항목이 한 번도 선언된 적이 없어서 `HAIKU_NO_DOWNLOADS=1`에서 `AddRepositoryPackage`가 아무 에러 없이 조용히 빠뜨렸고 -- 로컬 인덱스에 그냥 없는 것뿐 -- 의존성 solver가 `haikuwebkit`의 `lib:libcrypto` 요구를 채울 게 없었습니다. 지금까지 됐던 건 어느 예전 빌드의 `download/`에 누군가 손으로 hpkg를 넣어뒀던 게 패치로 한 번도 캡처되지 않은 채 남아있었기 때문입니다. |
 | `0015-arm64-webpositive-icu-data` | WebPositive가 실제 텍스트 레이아웃이 필요한 페이지(구글 홈페이지 등)를 열면 바로 죽었습니다: `WTF::TextBreakIteratorICU` 생성자가 ICU의 `ubrk_open()`이 실패하면 `RELEASE_ASSERT`를 겁니다. 빈/루트 로케일로도 실패했습니다. 원인: arm64의 부트스트랩 프로파일 `icu74` 패키지가 담고 있는 `libicudata.so.74`가 약 130KB짜리 스텁이라서, WebKit의 텍스트 분리에 필요한 약 30MB짜리 데이터셋이 빠져 있습니다 -- 그 전체 데이터셋은 `data/icu/74.1/icudt74l.dat`로 패키지 안에 같이 들어있지만 아무도 안 씁니다. 수정: `data/system/boot/SetupEnvironment`가 arm64에서 `ICU_DATA`를 그 경로로 export합니다 -- ICU 자체가 공식 지원하는 대체 경로 지정 방법입니다. |
+| `0016-arm64-openssh` | arm64에는 `ssh`/`sshd`가 아예 없었습니다 -- HaikuPorts의 진짜(부트스트랩 아닌) arm64 저장소 자체가 비어있습니다. `packages/openssh-10.4p1-1-arm64.hpkg`는 0012의 curl/wget과 같은 방식으로, HaikuPorts 자체의 net-misc/openssh 패치셋을 써서 크로스 빌드했습니다. libedit은 뺐습니다(arm64 패키지 목록에 없고, sftp 줄 편집 기능에만 쓰임). `data/launch/sshd`(job/service 쌍, `data/system/boot/SshdKeygen`이 먼저 호스트 키를 만든 뒤)로 부팅 시 시작하며, 둘 다 `build/jam/packages/Haiku`에 새로 등록했습니다 -- `SetupEnvironment`/`data/launch/system`/`user`와 마찬가지로, `data/` 밑의 파일이 실제로 이미지에 들어가는 유일한 방법입니다. 서비스는 `launch`로 직접이 아니라 `/bin/sh -c "sshd -D"`로 감싸서 실행합니다 -- 취향이 아니라 실패를 겪어서 정해졌습니다: 직접 launch하면 sshd 자신의 디버그 로그엔 listening 중이라고 나오는데도 모든 연결을 거부하고, `sh -c` 한 겹만 거치면 매번 제대로 됩니다. launch_daemon 내부까지 원인을 찾지는 못했습니다. |
 
 ## 사용법
 
@@ -208,6 +209,23 @@ HaikuWebKit 1.9.19, 1.9.26에서 확인됐고, 여기 arm64 이미지는 같은 
 `haikuwebkit`/`haikuwebkit_devel` 패키지를 다시 빌드해야 하는, 이 이미지와는
 별개의 작업입니다. (병렬로 진행 중인 다른 세션이 x86용으로 고치고 있으니, 여기서
 다시 조사하기 전에 그 수정이 1.10.0까지 반영됐는지 먼저 확인해볼 가치가 있습니다.)
+
+## 알려진 한계: SSH 비밀번호 인증
+
+`ssh`/`sshd`는 작동합니다 -- 키 기반 로그인은 호스트에서 게스트까지
+(`run-qemu-renku-arm64.sh`가 이미 설정해둔 `hostfwd=tcp::2222-:22`로) 끝까지
+확인했습니다. 비밀번호 인증은 안 됩니다: 어떤 비밀번호를 넣어도 거부되는데,
+`sshd -d -d -d`로 보면 방금 `passwd`로 설정한 비밀번호에도
+`mm_answer_authpassword: sending result 0`가 찍힙니다.
+
+원인: Haiku 자체 `crypt()`(`src/system/libroot/posix/crypt/crypt.cpp`)는
+Haiku 전용 scrypt 기반 해시(`$s$<n>$<salt>$<hash>`)를 쓰고, 실제 비밀번호
+저장소는 POSIX shadow 파일이 아니라 BMessage로 접근하는 레지스트라
+서비스입니다 -- `getspnam()`은 그 위에 얹은 호환 레이어일 뿐, 실제 파일을
+읽는 게 아닙니다. OpenSSH의 비밀번호 인증 경로(`auth-passwd.c` /
+`openbsd-compat/xcrypt.c`)는 POSIX shadow 파일 모델을 전제로 짜여 있어서,
+이 간극은 한 줄로 고칠 수준이 아니라 여기선 시도하지 않았습니다. 키 기반
+로그인은 영향받지 않고, 이 이미지에서 지원하는 방법입니다.
 
 ## 라이선스
 

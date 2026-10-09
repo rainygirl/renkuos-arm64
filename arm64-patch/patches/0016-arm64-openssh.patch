@@ -1,0 +1,150 @@
+Subject: [PATCH] arm64: ship OpenSSH (ssh, sshd, scp, sftp) at boot
+
+arm64 has no HaikuPorts openssh either -- see 0015's note on icu74, but
+worse here: there is no port for this architecture at all, bootstrap or
+not (build/jam/repositories/HaikuPorts/arm64's RemotePackageRepository
+baseurl has an empty real "current" index for arm64, confirmed by fetching
+it directly).
+
+packages/openssh-10.4p1-1-arm64.hpkg is cross-built the same way 0012's
+curl/wget/tar/gzip are, against this tree's own cross-compiler, openssl3
+and zlib, using HaikuPorts' own net-misc/openssh patchset for 10.4p1
+(github.com/haikuports/haikuports) -- OpenSSH's own ./configure already
+has native Haiku support; the patchset only fixes BFS having no hardlinks
+(ssh-keygen.c, hostfile.c, mux.c use rename() under __HAIKU__), two
+gcc2-only scoping bugs harmless to keep, and points ~/.ssh at Haiku's
+~/config/settings/ssh convention. Built without libedit, which is not in
+the arm64 package set and only gives sftp's interactive prompt line
+editing -- ssh/sshd/scp don't need it.
+
+The package ships no settings/ssh of its own (packagefs mounts a package
+read-only, and settings has to be writable) -- just data/openssh/*.default
+templates and an empty data/openssh/empty for the privsep chroot. It
+declares a package user/group (sshd, native .PackageInfo "users"/"groups"
+blocks, not a HaikuPorts-only concept) for privilege separation.
+
+data/system/boot/SshdKeygen materializes settings/ssh from those templates
+and runs `ssh-keygen -A` for host keys on first boot. data/launch/sshd
+runs it, then execs sshd -D, as one `/bin/sh -c "...; exec ..."` command on
+a single service -- not SshdKeygen as its own `job` with the service
+`requires`-ing it, which is the more obvious shape and was tried first.
+`requires` only orders launch_daemon's own trigger, not completion: on a
+freshly booted guest, where host-key generation can take several minutes
+(ssh-keygen -A waiting on an EFI/QEMU guest's thin early-boot entropy
+pool -- confirmed by comparing file timestamps: sshd_config at one point,
+every ssh_host_*_key file ten minutes later), sshd was already running
+with the `requires` form, had loaded zero host keys because none existed
+yet when it started, and stayed that way forever -- offering an empty
+host key algorithm list, which every client rejects with "no matching
+host key type found" and which nothing afterward makes it reload. Chaining
+onto one `;` makes the second command wait on the first no matter how long
+that actually takes, which `requires` turned out not to guarantee.
+
+The service launches sshd through `/bin/sh -c "... ; exec sshd -D"`, not
+`launch /system/sbin/sshd -D` directly -- settled by hitting a second,
+separate failure, not preference. Direct launch starts a process
+launch_daemon is happy to report as running, with host keys loaded and
+"Server listening on 0.0.0.0 port 22" in sshd's own debug log, and yet
+nothing ever accepts a connection (immediate ECONNREFUSED, not a timeout,
+so no firewall/NAT explanation fits) -- confirmed with a stock `ssh`
+client on the same guest, localhost, so it is not the network path
+either. The same binary, same flags, same user, launched from an
+interactive shell or through one layer of `sh -c`, listens and accepts
+connections correctly every time. Not yet root-caused inside
+launch_daemon; documented here as the working shape rather than left for
+the next person to rediscover.
+
+Neither file ships just by existing under data/ -- build/jam/packages/Haiku
+explicitly lists every boot script and launch file it packages (that is
+how SetupEnvironment and data/launch/system/user get in at all), so this
+also adds SshdKeygen to its bootScripts list and a matching
+AddFilesToPackage block for data/launch/sshd.
+diff --git a/build/jam/DefaultBuildProfiles b/build/jam/DefaultBuildProfiles
+index 2999e2ae6b..4d0f6adb27 100644
+--- a/build/jam/DefaultBuildProfiles
++++ b/build/jam/DefaultBuildProfiles
+@@ -226,6 +226,20 @@ rule DefineDefaultBuildProfiles
+ 					webpositive
+ 					;
+ 			}
++
++			# OpenSSH: not on HaikuPorts for arm64 either (no port has been
++			# built for this architecture at all -- the real, non-bootstrap
++			# arm64 repository is empty). Cross-built against this tree's own
++			# openssl3/zlib using HaikuPorts' own net-misc/openssh patchset
++			# (10.4p1), minus libedit (not in the arm64 package set; it only
++			# gives sftp interactive line-editing). data/launch/sshd starts
++			# it at boot, after data/system/boot/SshdKeygen generates host
++			# keys on first run.
++			if $(TARGET_PACKAGING_ARCH) = arm64 {
++				AddHaikuImageSystemPackages
++					openssh
++					;
++			}
+ 		}
+ 
+ 		case "test-*" : {
+diff --git a/build/jam/repositories/HaikuPorts/arm64 b/build/jam/repositories/HaikuPorts/arm64
+index fecbe51d03..9b34d41ea3 100644
+--- a/build/jam/repositories/HaikuPorts/arm64
++++ b/build/jam/repositories/HaikuPorts/arm64
+@@ -71,6 +71,7 @@ RemotePackageRepository HaikuPorts
+ 	libavif1.0-1.1.1-1
+ 	sqlite3-3.50.4-1
+ 	webpositive-r1~beta6_hrev99000_dirty-1
++	openssh-10.4p1-1
+ 	:
+ 	# source packages
+ 	bash
+diff --git a/data/launch/sshd b/data/launch/sshd
+new file mode 100644
+index 0000000000..51e64376e7
+--- /dev/null
++++ b/data/launch/sshd
+@@ -0,0 +1,4 @@
++service x-vnd.Haiku-sshd {
++	launch /bin/sh -c "/bin/sh /system/boot/SshdKeygen; exec /system/sbin/sshd -D"
++	no_safemode
++}
+diff --git a/data/system/boot/SshdKeygen b/data/system/boot/SshdKeygen
+new file mode 100755
+index 0000000000..3c90d3588c
+--- /dev/null
++++ b/data/system/boot/SshdKeygen
+@@ -0,0 +1,12 @@
++#!/bin/sh
++# Materializes openssh's writable settings and generates host keys on first
++# boot. The openssh package ships only data/openssh/*.default -- packagefs
++# mounts the package itself read-only, so settings/ssh has to be populated
++# here rather than shipped directly in the package (see arm64-patch 0016).
++dir=/boot/system/settings/ssh
++mkdir -p "$dir"
++mkdir -p /boot/system/var/run
++[ -f "$dir/sshd_config" ] || cp /boot/system/data/openssh/sshd_config.default "$dir/sshd_config"
++[ -f "$dir/ssh_config" ] || cp /boot/system/data/openssh/ssh_config.default "$dir/ssh_config"
++[ -f "$dir/ssh_host_rsa_key" ] || /boot/system/bin/ssh-keygen -A >/dev/null 2>&1
++exit 0
+diff --git a/build/jam/packages/Haiku b/build/jam/packages/Haiku
+index 661c49cdf1..5a3825e9ce 100644
+--- a/build/jam/packages/Haiku
++++ b/build/jam/packages/Haiku
+@@ -253,7 +253,7 @@ AddSymlinkToPackage bin : trash : untrash ;
+ AddSymlinkToPackage bin : less : more ;
+ 
+ # scripts and data files
+-local bootScripts = PostInstallScript SetupEnvironment ;
++local bootScripts = PostInstallScript SetupEnvironment SshdKeygen ;
+ SEARCH on $(bootScripts) = [ FDirName $(HAIKU_TOP) data system boot ] ;
+ AddFilesToPackage boot : $(bootScripts) ;
+ 
+@@ -265,6 +265,10 @@ local userLaunchScripts = <data!launch>user ;
+ SEARCH on $(userLaunchScripts) = [ FDirName $(HAIKU_TOP) data launch ] ;
+ AddFilesToPackage data user_launch : $(userLaunchScripts) ;
+ 
++local sshdLaunchScript = <data!launch>sshd ;
++SEARCH on $(sshdLaunchScript) = [ FDirName $(HAIKU_TOP) data launch ] ;
++AddFilesToPackage data launch : $(sshdLaunchScript) ;
++
+ # first login scripts
+ local firstLoginFiles = default_deskbar_items.sh ;
+ firstLoginFiles = $(firstLoginFiles:G=first-login) ;
