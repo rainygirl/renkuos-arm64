@@ -22,6 +22,8 @@ SKIP_CROSS_TOOLS=1 ./build-renku-arm64-iso.sh   # 캐시된 툴체인 재사용
 ./run-qemu-renku-arm64.sh                # 설치된 디스크를 창으로 부팅
 ./run-qemu-renku-arm64.sh --install      # ISO를 디스크와 함께 부팅(설치용)
 ./run-qemu-renku-arm64.sh --headless     # 창 없이 부팅
+./run-qemu-renku-arm64.sh --bridged      # LAN에서 접근 가능한 NIC 추가(sudo 필요)
+./run-qemu-renku-arm64.sh --clipboard    # 맥 클립보드를 게스트와 동기화
 ```
 
 `qemu-system-aarch64` 명령줄을 직접 조립하지 마세요.
@@ -218,5 +220,15 @@ HaikuWebKit 자체를 패치하고 `haikuwebkit`/`haikuwebkit_devel` 패키지�
 - **SSH**: `sshd`가 부팅 시 자동으로 시작합니다. 호스트에서 게스트로
   키 기반 로그인이 되는 것을 확인했습니다. 비밀번호 로그인은 Haiku의
   자체 인증 방식 때문에 안 됩니다(`arm64-patch/README.ko.md` 참고).
+- **브리지 네트워킹** (`--bridged`): 두 번째 NIC가 실제 LAN에서 DHCP로
+  주소를 받고, 게스트의 NAT 서브넷 바깥에서도 sshd가 응답하는 것을
+  확인했습니다. 이후 정상 종료까지 확인(sudo가 필요한 이유 등 자세한
+  내용은 스크립트 자체의 헤더 주석 "Bridged networking" 참고).
+- **클립보드 동기화** (`--clipboard`): `clipboard/clipboard-cli`를
+  크로스빌드해서 양방향 왕복을 확인했습니다 -- 맥의 `pbcopy`가 게스트
+  클립보드에 반영되는 것과, 게스트 클립보드가 `pbpaste`에 반영되는 것
+  둘 다. 기존 SSH 포트를 통해 1초 간격으로 폴링합니다. 텍스트만
+  지원합니다. Haiku에는 virtio-console이 아예 없어서(확인함, 추측
+  아님) QEMU를 통한 직접 채널은 애초에 불가능합니다.
 - **R\* 앱**: 부팅 후 호스팅된 저장소(https://pkgman.rainygirl.com/arm64)에서
   `pkgman`으로 설치합니다. ISO에 미리 들어있지는 않습니다.

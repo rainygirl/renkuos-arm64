@@ -22,6 +22,8 @@ When asked to "boot it", "run it", or "start QEMU":
 ./run-qemu-renku-arm64.sh                # boot the installed disk, in a window
 ./run-qemu-renku-arm64.sh --install      # boot the ISO with the disk attached
 ./run-qemu-renku-arm64.sh --headless     # no window
+./run-qemu-renku-arm64.sh --bridged      # add a LAN-reachable NIC (needs sudo)
+./run-qemu-renku-arm64.sh --clipboard    # sync the Mac's clipboard with the guest's
 ```
 
 Do not hand-assemble a `qemu-system-aarch64` command line. `run-qemu-renku-arm64.sh`
@@ -180,5 +182,15 @@ reinvestigating here.)
 - **SSH**: `sshd` starts at boot. Key-based login from the host to the
   guest confirmed working. Password login does not work, because of
   Haiku's own authentication model (see `arm64-patch/README.md`).
+- **Bridged networking** (`--bridged`): the second NIC comes up and gets a
+  DHCP lease on the real LAN; sshd on it answered from outside the guest's
+  NAT subnet, confirmed with a clean shutdown afterward (see "Bridged
+  networking" in the script's own header for the sudo requirement and why).
+- **Clipboard sync** (`--clipboard`): `clipboard/clipboard-cli` cross-built
+  and confirmed round-trip both directions -- `pbcopy` on the Mac reaching
+  the guest's clipboard, and the guest's clipboard reaching `pbpaste` --
+  over the existing SSH port, polled once a second. Text only; no
+  virtio-console exists in Haiku to do this through QEMU directly instead
+  (checked, not assumed).
 - **R\* apps**: install via `pkgman` from the hosted repository,
   https://pkgman.rainygirl.com/arm64, after boot -- not baked into the ISO.

@@ -4,6 +4,7 @@
 *.image
 *.img
 serial.log
+serial-bridged.log
 
 # macOS
 .DS_Store
