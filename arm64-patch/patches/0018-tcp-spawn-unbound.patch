@@ -1,0 +1,44 @@
+Subject: [PATCH] tcp: a spawned endpoint is not bound until BindChild() binds it
+
+spawn_pending_socket() copies the listening socket's local address into
+the new socket, so a fresh child endpoint already looks bound
+(IsBound() is true for 0.0.0.0:22), although only BindChild() puts it
+into the endpoint hash. When _Spawn() failed before that - in particular
+when BindChild() itself failed because the SYN's destination was no
+longer a local address while the interfaces were going down at shutdown
+- the child stayed among the listener's pending children, and when the
+listener was freed, ~TCPEndpoint() -> Unbind() panicked:
+
+  PANIC: bound endpoint 0xffffffff89de3c00 not in hash!
+  Thread 142 "sshd"
+    EndpointManager::Unbind
+    TCPEndpoint::~TCPEndpoint
+    tcp_uninit_protocol
+    put_domain_protocols
+    net_socket_private::~net_socket_private   (the child)
+    net_socket_private::~net_socket_private   (the listener)
+    socket_free
+
+On an x86_64 VM this hit 8 of 13 reboots while an ssh client kept trying
+to connect during shutdown. _Spawn() now clears the inherited address
+first, the way Unbind() does, so the child is bound exactly when it is
+in the hash.
+
+diff --git a/src/add-ons/kernel/network/protocols/tcp/TCPEndpoint.cpp b/src/add-ons/kernel/network/protocols/tcp/TCPEndpoint.cpp
+index 52bb0b5289..cfd1ac7a51 100644
+--- a/src/add-ons/kernel/network/protocols/tcp/TCPEndpoint.cpp
++++ b/src/add-ons/kernel/network/protocols/tcp/TCPEndpoint.cpp
+@@ -1562,6 +1562,13 @@ TCPEndpoint::_Spawn(TCPEndpoint* parent, tcp_segment_header& segment,
+ 
+ 	TRACE("Spawn()");
+ 
++	// spawn_pending_socket() copied the listening socket's local address
++	// into ours, so we look bound, but only BindChild() puts us into the
++	// endpoint hash. If we fail before that (the destination is no longer
++	// a local address while the interfaces go down, for one), the
++	// destructor's Unbind() panicked with "bound endpoint not in hash".
++	(*LocalAddress())->sa_len = 0;
++
+ 	// TODO: proper error handling!
+ 	if (ProtocolSocket::Open() != B_OK) {
+ 		T(Error(this, "opening failed", __LINE__));

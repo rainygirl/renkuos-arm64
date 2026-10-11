@@ -1,0 +1,74 @@
+Subject: [PATCH] net notifications: keep the module loaded instead of referencing it
+
+NetNotificationService::FirstAdded() took a reference to its own module
+with get_module() so that it stayed loaded while it had listeners. It
+runs inside the module's generic syscall (net_notifications_control()),
+and the module's uninit waits in unregister_generic_syscall() for that
+syscall to return - while put_module() holds the module lock. A listener
+added during an unload therefore deadlocked the boot on an x86_64 VM:
+
+  net_server (46): holds "modules rlock"; put_module(stack) ->
+    notifications_std_ops(B_MODULE_UNINIT) -> unregister_generic_syscall,
+    waiting for the syscall
+  launch_daemon (59): in net_notifications_control -> FirstAdded ->
+    get_module, waiting for "modules rlock"; holds the "network" lock
+  power_daemon, usb explore, uname: waiting behind them
+
+The module is B_KEEP_LOADED now, so it is never uninitialized while the
+syscall can run, and FirstAdded()/LastRemoved() no longer touch the
+module lock at all.
+
+diff --git a/src/add-ons/kernel/network/notifications/notifications.cpp b/src/add-ons/kernel/network/notifications/notifications.cpp
+index cdb7609d55..486a6d3071 100644
+--- a/src/add-ons/kernel/network/notifications/notifications.cpp
++++ b/src/add-ons/kernel/network/notifications/notifications.cpp
+@@ -29,8 +29,6 @@ public:
+ 
+ protected:
+ 	virtual	void				LastReferenceReleased();
+-	virtual	void				FirstAdded();
+-	virtual	void				LastRemoved();
+ };
+ 
+ 
+@@ -72,24 +70,6 @@ NetNotificationService::LastReferenceReleased()
+ }
+ 
+ 
+-void
+-NetNotificationService::FirstAdded()
+-{
+-	// The reference counting doesn't work for us, as we'll have to
+-	// ensure our module stays loaded.
+-	module_info* dummy;
+-	get_module(NET_NOTIFICATIONS_MODULE_NAME, &dummy);
+-}
+-
+-
+-void
+-NetNotificationService::LastRemoved()
+-{
+-	// Give up the reference _AddListener()
+-	put_module(NET_NOTIFICATIONS_MODULE_NAME);
+-}
+-
+-
+ //	#pragma mark - User generic syscall
+ 
+ 
+@@ -169,7 +149,14 @@ notifications_std_ops(int32 op, ...)
+ net_notifications_module_info sNotificationsModule = {
+ 	{
+ 		NET_NOTIFICATIONS_MODULE_NAME,
+-		0,
++		// Never unloaded. It used to take a module reference while it had
++		// listeners, by calling get_module() from inside its own generic
++		// syscall. That deadlocked against an unload already in progress:
++		// put_module() held the module lock and waited in
++		// unregister_generic_syscall() for the syscall to return, while the
++		// syscall waited for the module lock (net_server and launch_daemon
++		// at boot).
++		B_KEEP_LOADED,
+ 		notifications_std_ops
+ 	},
+ 
