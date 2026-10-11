@@ -1,0 +1,27 @@
+resource app_signature "application/x-vnd.RENKU-AppMarket";
+
+resource app_version {
+	major  = 1,
+	middle = 0,
+	minor  = 0,
+
+	/* 0 = development	1 = alpha			2 = beta
+	   3 = gamma		4 = golden master	5 = final */
+	variety = 0,
+
+	internal = 0,
+
+	short_info = "R AppMarket",
+	long_info  = "R AppMarket -- browse and install RENKU arm64 packages"
+};
+
+// A hand-encoded BeOS/Haiku-style tilted box (the classic generic-app
+// icon motif): three flat-shaded parallelogram faces forming an
+// isometric cube. Built by tools/gen-rappmarket-icon.py directly against
+// Haiku's own HVIF parser (src/libs/icon/flat_icon/FlatIconImporter.cpp)
+// rather than from a spec, since Haiku ships no bitmap/SVG-to-HVIF tool.
+resource vector_icon {
+	$"6E6369660301D8E4F2FF018FB0D9FF014C6FA5FF030A0440285838404828380A"
+	$"0428384048405A284A0A045838584A405A4048030A000100000A010101000A02"
+	$"010200"
+};
