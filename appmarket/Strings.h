@@ -16,11 +16,12 @@ enum StringKey {
 	kCouldNotReach,
 	kPackagesCount,   // "%d packages"
 	kInstalled,       // label inside the rounded "installed" row badge
-	kRefresh,
 	kInstall,
 	kUninstall,
 	kInstalling,      // "Installing %s..."
 	kRemoving,        // "Removing %s..."
+	kInstallingShort, // per-row button label while that row's install is in flight
+	kRemovingShort,   // per-row button label while that row's uninstall is in flight
 	kInstalledDone,   // "%s: installed."
 	kRemovedDone,     // "%s: removed."
 	kFailed,          // "%s: failed -- see Terminal/pkgman for details."
@@ -56,11 +57,12 @@ static const char* kTable[kStringCount][6] = {
 	/* kCouldNotReach  */ {"Could not reach the repository.", "저장소에 연결할 수 없습니다.", "リポジトリに接続できませんでした。", "Impossibile raggiungere il repository.", "Impossible de joindre le dépôt.", "No se pudo contactar con el repositorio."},
 	/* kPackagesCount  */ {"%d packages", "패키지 %d개", "%d個のパッケージ", "%d pacchetti", "%d paquets", "%d paquetes"},
 	/* kInstalled      */ {"installed", "설치됨", "インストール済み", "installato", "installé", "instalado"},
-	/* kRefresh        */ {"Refresh", "새로고침", "更新", "Aggiorna", "Actualiser", "Actualizar"},
 	/* kInstall        */ {"Install", "설치", "インストール", "Installa", "Installer", "Instalar"},
 	/* kUninstall      */ {"Uninstall", "제거", "アンインストール", "Disinstalla", "Désinstaller", "Desinstalar"},
 	/* kInstalling     */ {"Installing %s...", "%s 설치 중...", "%sをインストール中...", "Installazione di %s...", "Installation de %s...", "Instalando %s..."},
 	/* kRemoving       */ {"Removing %s...", "%s 제거 중...", "%sを削除中...", "Rimozione di %s...", "Suppression de %s...", "Eliminando %s..."},
+	/* kInstallingShort */ {"Installing...", "설치 중...", "インストール中...", "Installazione...", "Installation...", "Instalando..."},
+	/* kRemovingShort   */ {"Removing...", "제거 중...", "削除中...", "Rimozione...", "Suppression...", "Eliminando..."},
 	/* kInstalledDone  */ {"%s: installed.", "%s: 설치됨.", "%s: インストール完了。", "%s: installato.", "%s : installé.", "%s: instalado."},
 	/* kRemovedDone    */ {"%s: removed.", "%s: 제거됨.", "%s: 削除完了。", "%s: rimosso.", "%s : supprimé.", "%s: eliminado."},
 	/* kFailed         */ {"%s: failed -- see Terminal/pkgman for details.", "%s: 실패했습니다 -- 자세한 내용은 Terminal/pkgman을 확인하세요.", "%s: 失敗しました -- 詳細はTerminal/pkgmanを確認してください。", "%s: non riuscito -- vedi Terminal/pkgman per i dettagli.", "%s : échec -- voir Terminal/pkgman pour plus de détails.", "%s: fallo -- consulte Terminal/pkgman para más detalles."},

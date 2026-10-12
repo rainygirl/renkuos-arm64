@@ -37,6 +37,7 @@
 
 #include <OS.h>
 
+#include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
@@ -127,7 +128,6 @@ CurrentArch()
 static const uint32 kMsgRefreshDone = 'RFsh';
 static const uint32 kMsgOpDone = 'ROpD';
 static const uint32 kMsgAction = 'RAct';
-static const uint32 kMsgRefresh = 'RRef';
 static const uint32 kMsgSelectionChanged = 'RSel';
 static const uint32 kMsgFilterChanged = 'RFlt';
 static const uint32 kMsgSortChanged = 'RSrt';
@@ -249,7 +249,10 @@ public:
 		fShortDesc(shortDesc),
 		fFullDesc(fullDesc),
 		fInstalled(installed),
-		fIcon(NULL)
+		fIcon(NULL),
+		fBusy(false),
+		fBusyInstall(false),
+		fButtonRect()
 	{
 	}
 
@@ -273,6 +276,30 @@ public:
 		delete fIcon;
 		fIcon = icon;
 	}
+
+	// Set while this row's own install/uninstall job is in flight (see
+	// AppMarketWindow::_StartInstallJob/_HandleOpDone) -- shows a "..."
+	// label on this row's button instead of Install/Uninstall and makes it
+	// unclickable. sButtonsEnabled is separate and global: pkgman isn't
+	// safe to run twice concurrently against the same package database,
+	// so every row's button is disabled while *any* row has a job running,
+	// not just the one that started it.
+	bool IsBusy() const { return fBusy; }
+	void SetBusy(bool busy, bool install)
+	{
+		fBusy = busy;
+		fBusyInstall = install;
+	}
+	bool IsButtonClickable() const { return sButtonsEnabled && !fBusy; }
+
+	// Recomputed on every DrawItem() -- a row has to have been drawn at
+	// least once (true by the time a user could have clicked it) for this
+	// to be meaningful. Lets PackageListView::MouseDown hit-test the exact
+	// same rect DrawItem just painted, without duplicating its font-metric
+	// math.
+	BRect ButtonRect() const { return fButtonRect; }
+
+	static bool sButtonsEnabled;
 
 	void Update(BView* owner, const BFont* font)
 	{
@@ -352,8 +379,33 @@ public:
 			owner->SetDrawingMode(B_OP_COPY);
 		}
 
+		// The Install/Uninstall button sits on the right edge of the row --
+		// measured here, before maxTextWidth below, so the name/description
+		// text truncates to leave room for it instead of running underneath.
+		// Sized from the longer of "Install"/"Uninstall" (not whichever one
+		// this row happens to need right now) so the button's width -- and
+		// therefore how much text space is reserved for it -- never changes
+		// between an install and its own eventual uninstall; drawn in the
+		// same smallFont as the repo/description text for consistency.
+		BString installLabel(T(kInstall));
+		BString uninstallLabel(T(kUninstall));
+		owner->SetFont(&smallFont);
+		float buttonTextWidth = std::max(owner->StringWidth(installLabel.String()),
+			owner->StringWidth(uninstallLabel.String()));
+		owner->SetFont(&font);
+
+		float buttonHeight = ceilf(sfh.ascent + sfh.descent) + 10.0f;
+		float buttonWidth = buttonTextWidth + 32.0f;
+		if (buttonWidth < 70.0f)
+			buttonWidth = 70.0f;
+
+		float buttonRight = frame.right - 10.0f;
+		float buttonTop = frame.top + (frame.Height() - buttonHeight) / 2.0f;
+		fButtonRect = BRect(buttonRight - buttonWidth, buttonTop, buttonRight,
+			buttonTop + buttonHeight);
+
 		float textX = iconX + kIconPreviewSize + 8;
-		float maxTextWidth = frame.right - textX - 6;
+		float maxTextWidth = frame.right - textX - 6 - (buttonWidth + 14.0f);
 
 		// The "installed" badge is a small rounded pill drawn after the
 		// name, not appended as "(installed)" text -- measured first (in
@@ -427,6 +479,48 @@ public:
 
 			owner->SetFont(&font);
 		}
+
+		// The button itself, in the slot reserved for it above. Red for
+		// Uninstall, blue for Install, matching no particular Haiku
+		// convention -- there isn't one for this -- just picked to read as
+		// "stop"/"go" at a glance. Greyed out and unclickable (see
+		// IsButtonClickable) either for this one specific row, while its
+		// own job is running (shows "Installing..."/"Removing..." instead
+		// of its usual label), or for every row at once while some other
+		// row's job is running -- pkgman isn't safe to invoke twice
+		// concurrently against the same package database.
+		BString buttonLabel = fBusy
+			? BString(T(fBusyInstall ? kInstallingShort : kRemovingShort))
+			: (fInstalled ? uninstallLabel : installLabel);
+
+		owner->SetFont(&smallFont);
+		float buttonLabelWidth = owner->StringWidth(buttonLabel.String());
+
+		bool clickable = sButtonsEnabled && !fBusy;
+		rgb_color buttonFill, buttonTextColor;
+		if (!clickable) {
+			buttonFill = tint_color(background, B_DARKEN_2_TINT);
+			buttonTextColor = tint_color(background, B_DARKEN_4_TINT);
+		} else if (fInstalled) {
+			buttonFill = (rgb_color){ 198, 40, 40, 255 };
+			buttonTextColor = (rgb_color){ 255, 255, 255, 255 };
+		} else {
+			buttonFill = (rgb_color){ 33, 150, 243, 255 };
+			buttonTextColor = (rgb_color){ 255, 255, 255, 255 };
+		}
+
+		owner->SetHighColor(buttonFill);
+		owner->FillRoundRect(fButtonRect, 4.0f, 4.0f);
+
+		owner->SetHighColor(buttonTextColor);
+		owner->SetLowColor(buttonFill);
+		float buttonBaseline = fButtonRect.top
+			+ (fButtonRect.Height() - (sfh.ascent + sfh.descent)) / 2.0f + sfh.ascent;
+		float buttonTextX = fButtonRect.left
+			+ (fButtonRect.Width() - buttonLabelWidth) / 2.0f;
+		owner->DrawString(buttonLabel.String(), BPoint(buttonTextX, buttonBaseline));
+		owner->SetFont(&font);
+		owner->SetLowColor(background);
 	}
 
 private:
@@ -437,6 +531,44 @@ private:
 	BString fFullDesc;
 	bool fInstalled;
 	BBitmap* fIcon;
+	bool fBusy;
+	bool fBusyInstall;
+	BRect fButtonRect;
+};
+
+bool PackageItem::sButtonsEnabled = true;
+
+// A plain BListView has no way to put a real, separately-clickable child
+// control inside each row -- BListItem only draws, it isn't a view -- so
+// the per-row Install/Uninstall button (see PackageItem::DrawItem) is hit-
+// tested here by hand: a click lands on the button instead of the normal
+// select-this-row behavior only when it falls inside the rect DrawItem
+// itself just painted. Posting straight to Window() rather than going
+// through a stored BMessenger keeps this in step with how AddRepoWindow's
+// own buttons already talk back to the main window, elsewhere in this file.
+class PackageListView : public BListView {
+public:
+	PackageListView(const char* name)
+		:
+		BListView(name, B_SINGLE_SELECTION_LIST)
+	{
+	}
+
+	void MouseDown(BPoint where)
+	{
+		int32 index = IndexOf(where);
+		PackageItem* item = index >= 0 ? (PackageItem*)ItemAt(index) : NULL;
+		if (item != NULL && item->ButtonRect().Contains(where)
+				&& item->IsButtonClickable()) {
+			if (CurrentSelection() != index)
+				Select(index);
+			BMessage action(kMsgAction);
+			action.AddInt32("index", index);
+			Window()->PostMessage(&action);
+			return;
+		}
+		BListView::MouseDown(where);
+	}
 };
 
 // A plain two-label strip drawn above the list, aligned with PackageItem's
@@ -1188,10 +1320,11 @@ public:
 			B_ASYNCHRONOUS_CONTROLS),
 		fAllPackages(20),
 		fSortMode(kSortByPackage),
+		fOperationInProgress(false),
 		fActiveIconFetches(0),
 		fIconGeneration(0)
 	{
-		fListView = new BListView("packages", B_SINGLE_SELECTION_LIST);
+		fListView = new PackageListView("packages");
 		fListView->SetSelectionMessage(new BMessage(kMsgSelectionChanged));
 		BScrollView* scroll = new BScrollView("scroll", fListView,
 			0, false, true);
@@ -1249,18 +1382,6 @@ public:
 		descScroll->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, 220));
 
 		fStatus = new BStringView("status", T(kLoading));
-		fRefreshButton = new BButton("refresh", T(kRefresh),
-			new BMessage(kMsgRefresh));
-		// One message, not kMsgInstall/kMsgUninstall picked at construction
-		// time: the button's label is updated on every selection change
-		// (see MessageReceived), and a BButton's invocation message doesn't
-		// follow its label automatically. MessageReceived reads the
-		// selected item's own Installed() state to decide which action a
-		// click means, instead of relying on two things (label, message)
-		// staying in sync.
-		fActionButton = new BButton("action", T(kInstall),
-			new BMessage(kMsgAction));
-		fActionButton->SetEnabled(false);
 
 		// The name-only BView/BListView constructors leave the view with no
 		// frame at all -- they're meant to be driven entirely by a BLayout,
@@ -1284,8 +1405,6 @@ public:
 				.AddGroup(B_HORIZONTAL, 10)
 					.Add(fStatus)
 					.AddGlue()
-					.Add(fRefreshButton)
-					.Add(fActionButton)
 				.End()
 			.End();
 
@@ -1295,10 +1414,6 @@ public:
 	void MessageReceived(BMessage* message)
 	{
 		switch (message->what) {
-			case kMsgRefresh:
-				_Refresh();
-				break;
-
 			case kMsgRefreshDone:
 				_HandleRefreshDone(message);
 				break;
@@ -1312,9 +1427,7 @@ public:
 				// what's already there, no fetch, no wait.
 				PackageItem* item
 					= (PackageItem*)fListView->ItemAt(fListView->CurrentSelection());
-				fActionButton->SetEnabled(item != NULL);
 				if (item != NULL) {
-					fActionButton->SetLabel(item->Installed() ? T(kUninstall) : T(kInstall));
 					fDescriptionView->SetText(item->FullDescription().Length() > 0
 						? item->FullDescription().String() : T(kNoDescription));
 				} else {
@@ -1325,10 +1438,15 @@ public:
 
 			case kMsgAction:
 			{
-				PackageItem* item
-					= (PackageItem*)fListView->ItemAt(fListView->CurrentSelection());
-				if (item != NULL)
-					_StartInstallJob(!item->Installed());
+				// Sent by PackageListView::MouseDown with the specific row
+				// clicked -- not necessarily (though usually, by then) the
+				// current selection, so this reads straight from the index
+				// it carries rather than fListView->CurrentSelection().
+				int32 index = -1;
+				message->FindInt32("index", &index);
+				PackageItem* item = (PackageItem*)fListView->ItemAt(index);
+				if (item != NULL && !fOperationInProgress)
+					_StartInstallJob(!item->Installed(), item);
 				break;
 			}
 
@@ -1394,7 +1512,6 @@ private:
 	void _Refresh()
 	{
 		fStatus->SetText(T(kFetchingList));
-		fRefreshButton->SetEnabled(false);
 
 		BObjectList<BString, true>* urls = new BObjectList<BString, true>(8);
 		const char* arch = CurrentArch();
@@ -1488,7 +1605,6 @@ private:
 
 	void _HandleRefreshDone(BMessage* message)
 	{
-		fRefreshButton->SetEnabled(true);
 		bool success = false;
 		message->FindBool("success", &success);
 		if (!success) {
@@ -1504,7 +1620,6 @@ private:
 		// Old PackageItems are about to be deleted -- drop every view that
 		// might still be pointing at one of them first.
 		fDescriptionView->SetText("");
-		fActionButton->SetEnabled(false);
 		fAllPackages.MakeEmpty();
 
 		BString name, repo, repoUrl, shortDesc, fullDesc;
@@ -1614,15 +1729,13 @@ private:
 		return cmp != 0 ? cmp : a->PackageName().ICompare(b->PackageName());
 	}
 
-	void _StartInstallJob(bool install)
+	void _StartInstallJob(bool install, PackageItem* item)
 	{
-		PackageItem* item
-			= (PackageItem*)fListView->ItemAt(fListView->CurrentSelection());
-		if (item == NULL)
-			return;
+		fOperationInProgress = true;
+		PackageItem::sButtonsEnabled = false;
+		item->SetBusy(true, install);
+		fListView->Invalidate();
 
-		fActionButton->SetEnabled(false);
-		fRefreshButton->SetEnabled(false);
 		fStatus->SetText(TF(install ? kInstalling : kRemoving,
 			item->PackageName().String()).String());
 		// Commandeered as this run's live log (see kMsgInstallLog) until
@@ -1635,34 +1748,43 @@ private:
 		job->install = install;
 		thread_id t = spawn_thread(InstallThreadFunc, "appmarket-install",
 			B_NORMAL_PRIORITY, job);
-		if (t >= 0)
+		if (t >= 0) {
 			resume_thread(t);
-		else
+		} else {
 			delete job;
+			fOperationInProgress = false;
+			PackageItem::sButtonsEnabled = true;
+			item->SetBusy(false, install);
+			fListView->Invalidate();
+		}
 	}
 
 	void _HandleOpDone(BMessage* message)
 	{
-		fRefreshButton->SetEnabled(true);
 		BString name;
 		bool install = false, success = false;
 		message->FindString("name", &name);
 		message->FindBool("install", &install);
 		message->FindBool("success", &success);
 
-		for (int32 i = 0; i < fListView->CountItems(); i++) {
-			PackageItem* item = (PackageItem*)fListView->ItemAt(i);
+		fOperationInProgress = false;
+		PackageItem::sButtonsEnabled = true;
+
+		// Looked up in fAllPackages, not fListView: the package being
+		// installed might have been filtered out of the visible list by
+		// the time its job finishes (the user switched the repo filter
+		// mid-install), but its busy/installed state still has to be
+		// cleared so the row is back to normal whenever it's shown again.
+		for (int32 i = 0; i < fAllPackages.CountItems(); i++) {
+			PackageItem* item = fAllPackages.ItemAt(i);
 			if (item->PackageName() == name) {
 				if (success)
 					item->SetInstalled(install);
-				fListView->InvalidateItem(i);
-				if (fListView->CurrentSelection() == i) {
-					fActionButton->SetEnabled(true);
-					fActionButton->SetLabel(item->Installed() ? T(kUninstall) : T(kInstall));
-				}
+				item->SetBusy(false, install);
 				break;
 			}
 		}
+		fListView->Invalidate();
 
 		StringKey key = success ? (install ? kInstalledDone : kRemovedDone) : kFailed;
 		fStatus->SetText(TF(key, name.String()).String());
@@ -1756,11 +1878,13 @@ private:
 	BMenu* fRemoveRepoMenu;
 	BTextView* fDescriptionView;
 	BStringView* fStatus;
-	BButton* fRefreshButton;
-	BButton* fActionButton;
 
 	BObjectList<PackageItem, true> fAllPackages;
 	SortMode fSortMode;
+
+	// True while some row's install/uninstall job is running -- see
+	// _StartInstallJob/_HandleOpDone and PackageItem::sButtonsEnabled.
+	bool fOperationInProgress;
 
 	// Repos the user has added at runtime (see AddRepoWindow), persisted
 	// via SaveCustomRepos/LoadCustomRepos -- kRepos itself never changes.
