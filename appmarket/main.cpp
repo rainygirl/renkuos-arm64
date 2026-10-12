@@ -276,19 +276,36 @@ public:
 		font_height fh;
 		font.GetHeight(&fh);
 
+		// Shared by the repo column and the description line below the
+		// name -- both are secondary text, drawn smaller than the name.
+		BFont smallFont(font);
+		smallFont.SetSize(font.Size() * 0.85f);
+		font_height sfh;
+		smallFont.GetHeight(&sfh);
+
+		// The name is the one thing on a row meant to stand out, so it's
+		// drawn bold; everything else (repo, description) stays regular
+		// weight at or below the base size.
+		BFont boldFont(font);
+		boldFont.SetFace(B_BOLD_FACE);
+		font_height bdfh;
+		boldFont.GetHeight(&bdfh);
+
 		// Repo column, vertically centered against the full (two-line)
 		// row height -- truncated with an ellipsis rather than widening
 		// the column to fit, since the tag is now a full hostname (see
 		// HostFromURL) and an unusually long one should clip instead of
 		// pushing into the package column.
+		owner->SetFont(&smallFont);
 		owner->SetHighColor(textColor);
 		owner->SetLowColor(background);
 		BString repoText(fRepo);
 		owner->TruncateString(&repoText, B_TRUNCATE_END,
 			kRepoColumnWidth - 8);
 		float repoBaseline = frame.top
-			+ (frame.Height() - (fh.ascent + fh.descent)) / 2.0f + fh.ascent;
+			+ (frame.Height() - (sfh.ascent + sfh.descent)) / 2.0f + sfh.ascent;
 		owner->DrawString(repoText.String(), BPoint(frame.left + 6, repoBaseline));
+		owner->SetFont(&font);
 
 		rgb_color ruleColor = tint_color(background, B_DARKEN_1_TINT);
 		owner->SetHighColor(ruleColor);
@@ -332,20 +349,22 @@ public:
 			owner->SetFont(&font);
 		}
 
+		owner->SetFont(&boldFont);
 		owner->SetHighColor(textColor);
 		owner->SetLowColor(background);
 		BString nameText(fName);
 		owner->TruncateString(&nameText, B_TRUNCATE_END,
 			maxTextWidth - (fInstalled ? badgeWidth + 8.0f : 0.0f));
-		float nameBaseline = frame.top + 5.0f + fh.ascent;
+		float nameBaseline = frame.top + 5.0f + bdfh.ascent;
 		owner->DrawString(nameText.String(), BPoint(textX, nameBaseline));
+		owner->SetFont(&font);
 
 		if (fInstalled) {
 			static const rgb_color kBadgeBackground = { 76, 175, 80, 255 };
 			static const rgb_color kBadgeTextColor = { 255, 255, 255, 255 };
 
-			float nameLineCenter = frame.top + 5.0f + (fh.ascent + fh.descent) / 2.0f;
-			float badgeLeft = textX + owner->StringWidth(nameText.String()) + 8.0f;
+			float nameLineCenter = frame.top + 5.0f + (bdfh.ascent + bdfh.descent) / 2.0f;
+			float badgeLeft = textX + boldFont.StringWidth(nameText.String()) + 8.0f;
 			float badgeTop = nameLineCenter - badgeHeight / 2.0f;
 			BRect badgeRect(badgeLeft, badgeTop,
 				badgeLeft + badgeWidth, badgeTop + badgeHeight);
@@ -364,11 +383,7 @@ public:
 		}
 
 		if (fShortDesc.Length() > 0) {
-			BFont descFont(font);
-			descFont.SetSize(font.Size() * 0.85f);
-			owner->SetFont(&descFont);
-			font_height dfh;
-			descFont.GetHeight(&dfh);
+			owner->SetFont(&smallFont);
 
 			// A muted version of the text color, blended toward the
 			// background rather than just darkened, so it stays legible
@@ -383,7 +398,7 @@ public:
 
 			BString descText(fShortDesc);
 			owner->TruncateString(&descText, B_TRUNCATE_END, maxTextWidth);
-			float descBaseline = nameBaseline + fh.descent + 3.0f + dfh.ascent;
+			float descBaseline = nameBaseline + bdfh.descent + 3.0f + sfh.ascent;
 			owner->DrawString(descText.String(), BPoint(textX, descBaseline));
 
 			owner->SetFont(&font);
