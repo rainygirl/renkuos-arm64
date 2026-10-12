@@ -263,9 +263,7 @@ public:
 	bool Installed() const { return fInstalled; }
 	void SetInstalled(bool installed) { fInstalled = installed; }
 
-	// Owns whatever bitmap it's handed (deletes the previous one first);
-	// the row and the detail panel's IconPreviewView both just borrow
-	// this pointer to draw from, never delete it themselves.
+	// Owns whatever bitmap it's handed (deletes the previous one first).
 	BBitmap* Icon() const { return fIcon; }
 	void SetIcon(BBitmap* icon)
 	{
@@ -470,47 +468,6 @@ public:
 		StrokeLine(BPoint(Bounds().left, Bounds().bottom),
 			BPoint(Bounds().right, Bounds().bottom));
 	}
-};
-
-// Shows the selected package's own real icon, fetched from its actual
-// .hpkg (see _QueueIconFetches/IconThreadFunc) -- not a placeholder.
-// Just borrows whatever bitmap it's handed; the owning PackageItem (see
-// above) is what actually deletes it, since the same bitmap is also what
-// the row itself draws from. (kIconPreviewSize itself is declared above,
-// next to PackageItem -- the row needs it too, to cap its own icon at
-// the bitmap's native resolution.)
-class IconPreviewView : public BView {
-public:
-	IconPreviewView()
-		:
-		BView("icon-preview", B_WILL_DRAW),
-		fBitmap(NULL)
-	{
-		SetViewUIColor(B_PANEL_BACKGROUND_COLOR);
-		SetExplicitSize(BSize(kIconPreviewSize - 1, kIconPreviewSize - 1));
-	}
-
-	void SetBitmap(BBitmap* bitmap)
-	{
-		fBitmap = bitmap;
-		Invalidate();
-	}
-
-	void Draw(BRect updateRect)
-	{
-		rgb_color background = ui_color(B_PANEL_BACKGROUND_COLOR);
-		SetHighColor(background);
-		FillRect(Bounds());
-
-		if (fBitmap != NULL) {
-			SetDrawingMode(B_OP_ALPHA);
-			DrawBitmap(fBitmap, Bounds());
-			SetDrawingMode(B_OP_COPY);
-		}
-	}
-
-private:
-	BBitmap* fBitmap;
 };
 
 struct InstallJob {
@@ -1077,8 +1034,6 @@ public:
 		LoadCustomRepos(&fCustomRepos);
 		_RebuildRemoveRepoMenu();
 
-		fIconPreview = new IconPreviewView();
-
 		fDescriptionView = new BTextView("description");
 		fDescriptionView->MakeEditable(false);
 		fDescriptionView->SetWordWrap(true);
@@ -1124,10 +1079,7 @@ public:
 				.End()
 				.Add(fHeader)
 				.Add(scroll, 3)
-				.AddGroup(B_HORIZONTAL, 10, 1)
-					.Add(fIconPreview)
-					.Add(descScroll)
-				.End()
+				.Add(descScroll, 1)
 				.AddGroup(B_HORIZONTAL, 10)
 					.Add(fStatus)
 					.AddGlue()
@@ -1164,10 +1116,8 @@ public:
 					fActionButton->SetLabel(item->Installed() ? T(kUninstall) : T(kInstall));
 					fDescriptionView->SetText(item->FullDescription().Length() > 0
 						? item->FullDescription().String() : T(kNoDescription));
-					fIconPreview->SetBitmap(item->Icon());
 				} else {
 					fDescriptionView->SetText("");
-					fIconPreview->SetBitmap(NULL);
 				}
 				break;
 			}
@@ -1332,10 +1282,8 @@ private:
 		// does not delete, never MakeEmpty(), which does.
 		for (int32 i = fListView->CountItems() - 1; i >= 0; i--)
 			fListView->RemoveItem(i);
-		// Old PackageItems (and whatever icon each already had) are about
-		// to be deleted -- drop every view that might still be pointing at
-		// one of them first.
-		fIconPreview->SetBitmap(NULL);
+		// Old PackageItems are about to be deleted -- drop every view that
+		// might still be pointing at one of them first.
 		fDescriptionView->SetText("");
 		fActionButton->SetEnabled(false);
 		fAllPackages.MakeEmpty();
@@ -1567,8 +1515,6 @@ private:
 				int32 visibleIndex = fListView->IndexOf(target);
 				if (visibleIndex >= 0)
 					fListView->InvalidateItem(visibleIndex);
-				if (fListView->ItemAt(fListView->CurrentSelection()) == target)
-					fIconPreview->SetBitmap(target->Icon());
 			} else {
 				delete icon;
 			}
@@ -1586,7 +1532,6 @@ private:
 	BMenuField* fSortField;
 	BMenuBar* fMenuBar;
 	BMenu* fRemoveRepoMenu;
-	IconPreviewView* fIconPreview;
 	BTextView* fDescriptionView;
 	BStringView* fStatus;
 	BButton* fRefreshButton;
