@@ -6,10 +6,13 @@
 // already-trusted `pkgman` and `curl` for everything that touches the
 // network or the package database, the same tools a user would run by
 // hand in Terminal.
+#include <AppFileInfo.h>
 #include <Application.h>
+#include <Bitmap.h>
 #include <Button.h>
 #include <Directory.h>
 #include <Entry.h>
+#include <File.h>
 #include <LayoutBuilder.h>
 #include <ListItem.h>
 #include <ListView.h>
@@ -19,6 +22,7 @@
 #include <Messenger.h>
 #include <ObjectList.h>
 #include <PopUpMenu.h>
+#include <Roster.h>
 #include <ScrollView.h>
 #include <String.h>
 #include <StringView.h>
@@ -27,6 +31,7 @@
 
 #include <OS.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -44,20 +49,37 @@ static const char* kPackagesDir = "/boot/system/packages";
 // was itself built for (CurrentArch below). A repo whose arch doesn't
 // match is skipped entirely: never listed, never added via `pkgman
 // add-repo`, never fetched.
+//
+// No separate display-name field: the repo's own hostname (see
+// HostFromURL below) is what's shown, so the displayed tag can never
+// drift from the URL that's actually being queried.
 struct RepoDef {
-	const char* name;
 	const char* url;
 	const char* arch; // "arm64", "x86_64", or "x86"
 };
 
 static const RepoDef kRepos[] = {
-	{ "RENKU", "https://pkgman.rainygirl.com/arm64", "arm64" },
-	{ "Spritz", "https://spritzdepot.desktoponfire.com/repo/x86_64/current", "x86_64" },
-	{ "Grexe's", "https://kiri.sen-labs.org/x86_64", "x86_64" },
-	{ "Besly", "https://software.besly.de/repo64", "x86_64" },
-	{ "FattElk", "http://fatelk.com/repo_64", "x86_64" },
+	{ "https://pkgman.rainygirl.com/arm64", "arm64" },
+	{ "https://spritzdepot.desktoponfire.com/repo/x86_64/current", "x86_64" },
+	{ "https://kiri.sen-labs.org/x86_64", "x86_64" },
+	{ "https://software.besly.de/repo64", "x86_64" },
+	{ "http://fatelk.com/repo_64", "x86_64" },
 };
 static const int32 kRepoCount = sizeof(kRepos) / sizeof(kRepos[0]);
+
+// Just the host part of a repo URL ("pkgman.rainygirl.com" out of
+// "https://pkgman.rainygirl.com/arm64") -- what gets shown as the Repo
+// column/filter tag.
+static BString
+HostFromURL(const char* url)
+{
+	const char* host = strstr(url, "://");
+	host = host != NULL ? host + 3 : url;
+	const char* end = host;
+	while (*end != '\0' && *end != '/' && *end != ':')
+		end++;
+	return BString(host, (int32)(end - host));
+}
 
 // Haiku has no fat/universal binaries -- a given build of this app only
 // ever runs on the architecture it was compiled for -- so the running
@@ -129,17 +151,30 @@ IsPackageInstalled(const BString& name)
 	return false;
 }
 
-// How wide the "Repo" column is drawn, in pixels. Package names never
-// overlap it, regardless of how the BListView itself is resized -- this
-// is a fixed two-column layout, not something that reflows.
-static const float kRepoColumnWidth = 90.0f;
+// Column layout, in pixels: a fixed icon column, then a fixed "Repo"
+// column, then the package name filling the rest. Package names never
+// overlap either of the first two, regardless of how the BListView
+// itself is resized -- this is a fixed layout, not something that
+// reflows.
+static const float kIconColumnWidth = 24.0f;
+static const float kRepoColumnWidth = 280.0f;
+static const float kIconSize = 16.0f;
 
-// A plain two-column row: repo name on the left, package name (plus an
-// "(installed)" suffix) on the right, with a vertical rule between them.
+// A plain row: a generic app icon, repo name, then package name (plus an
+// "(installed)" suffix), with a vertical rule between the text columns.
 // BStringItem can't do separate cells at all -- it is exactly one string
 // -- so this draws itself directly instead of just holding display text.
+//
+// Every row shares the same icon (sIcon, set once by AppMarketWindow from
+// this app's own resource -- see RAppMarket.rdef): packages.txt is just
+// names, nothing it advertises carries real per-package icon artwork, and
+// downloading each listed package's .hpkg merely to read its icon before
+// the user has asked to install anything would be a lot of network traffic
+// for a cosmetic detail.
 class PackageItem : public BListItem {
 public:
+	static BBitmap* sIcon;
+
 	PackageItem(const BString& name, const BString& repo, bool installed)
 		:
 		BListItem(),
@@ -159,7 +194,8 @@ public:
 		BListItem::Update(owner, font);
 		font_height fh;
 		font->GetHeight(&fh);
-		SetHeight(ceilf(fh.ascent + fh.descent + fh.leading) + 6.0f);
+		SetHeight(std::max(ceilf(fh.ascent + fh.descent + fh.leading) + 6.0f,
+			kIconSize + 4.0f));
 	}
 
 	void DrawItem(BView* owner, BRect frame, bool complete)
@@ -170,6 +206,13 @@ public:
 		owner->SetLowColor(background);
 		owner->SetHighColor(background);
 		owner->FillRect(frame);
+
+		if (sIcon != NULL) {
+			float y = frame.top + (frame.Height() - kIconSize) / 2.0f;
+			owner->SetDrawingMode(B_OP_ALPHA);
+			owner->DrawBitmap(sIcon, BPoint(frame.left + 4, y));
+			owner->SetDrawingMode(B_OP_COPY);
+		}
 
 		font_height fh;
 		owner->GetFontHeight(&fh);
@@ -182,13 +225,21 @@ public:
 		owner->SetHighColor(textColor);
 		owner->SetLowColor(background);
 
-		owner->DrawString(fRepo.String(), BPoint(frame.left + 6, baseline));
+		// Truncated with an ellipsis rather than just widening the column
+		// to fit -- a repo tag is now a full hostname (see HostFromURL),
+		// and an unusually long one should clip instead of pushing into
+		// the package column.
+		BString repoText(fRepo);
+		owner->TruncateString(&repoText, B_TRUNCATE_END,
+			kRepoColumnWidth - 8);
+		owner->DrawString(repoText.String(),
+			BPoint(frame.left + kIconColumnWidth, baseline));
 
 		rgb_color ruleColor = tint_color(background, B_DARKEN_1_TINT);
 		owner->SetHighColor(ruleColor);
 		owner->StrokeLine(
-			BPoint(frame.left + kRepoColumnWidth, frame.top),
-			BPoint(frame.left + kRepoColumnWidth, frame.bottom));
+			BPoint(frame.left + kIconColumnWidth + kRepoColumnWidth, frame.top),
+			BPoint(frame.left + kIconColumnWidth + kRepoColumnWidth, frame.bottom));
 
 		owner->SetHighColor(textColor);
 		BString text(fName);
@@ -197,7 +248,7 @@ public:
 			text << T(kInstalled);
 		}
 		owner->DrawString(text.String(),
-			BPoint(frame.left + kRepoColumnWidth + 8, baseline));
+			BPoint(frame.left + kIconColumnWidth + kRepoColumnWidth + 8, baseline));
 	}
 
 private:
@@ -205,6 +256,8 @@ private:
 	BString fRepo;
 	bool fInstalled;
 };
+
+BBitmap* PackageItem::sIcon = NULL;
 
 // A plain two-label strip drawn above the list, aligned with PackageItem's
 // own column layout -- BListView has no header of its own.
@@ -232,8 +285,9 @@ public:
 			+ (Bounds().Height() - (fh.ascent + fh.descent)) / 2.0f + fh.ascent;
 
 		SetHighColor(ui_color(B_PANEL_TEXT_COLOR));
-		DrawString(T(kColumnRepo), BPoint(6, baseline));
-		DrawString(T(kColumnPackage), BPoint(kRepoColumnWidth + 8, baseline));
+		DrawString(T(kColumnRepo), BPoint(kIconColumnWidth, baseline));
+		DrawString(T(kColumnPackage),
+			BPoint(kIconColumnWidth + kRepoColumnWidth + 8, baseline));
 
 		StrokeLine(BPoint(Bounds().left, Bounds().bottom),
 			BPoint(Bounds().right, Bounds().bottom));
@@ -351,7 +405,7 @@ RefreshThreadFunc(void* data)
 		BString listing = RunCaptured(listCmd.String());
 		if (listing.Length() > 0) {
 			any = true;
-			AppendUniqueLines(listing, repo.name, &done);
+			AppendUniqueLines(listing, HostFromURL(repo.url).String(), &done);
 		}
 	}
 
@@ -366,11 +420,25 @@ class AppMarketWindow : public BWindow {
 public:
 	AppMarketWindow()
 		:
-		BWindow(BRect(100, 100, 700, 760), T(kWindowTitle), B_TITLED_WINDOW,
+		BWindow(BRect(100, 100, 900, 760), T(kWindowTitle), B_TITLED_WINDOW,
 			B_ASYNCHRONOUS_CONTROLS),
 		fAllPackages(20),
 		fSortMode(kSortByPackage)
 	{
+		if (PackageItem::sIcon == NULL) {
+			app_info info;
+			if (be_app->GetAppInfo(&info) == B_OK) {
+				BFile file(&info.ref, B_READ_ONLY);
+				BAppFileInfo appFileInfo(&file);
+				BBitmap* icon = new BBitmap(
+					BRect(0, 0, kIconSize - 1, kIconSize - 1), B_RGBA32);
+				if (appFileInfo.GetIcon(icon, B_MINI_ICON) == B_OK)
+					PackageItem::sIcon = icon;
+				else
+					delete icon;
+			}
+		}
+
 		fListView = new BListView("packages", B_SINGLE_SELECTION_LIST);
 		fListView->SetSelectionMessage(new BMessage(kMsgSelectionChanged));
 		BScrollView* scroll = new BScrollView("scroll", fListView,
