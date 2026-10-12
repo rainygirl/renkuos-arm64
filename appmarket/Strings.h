@@ -32,6 +32,8 @@ enum StringKey {
 	kSortByName,
 	kSortByRepo,
 	kNoDescription,
+	kMenuFile,             // "File" menu title
+	kMenuQuit,             // "Quit" menu item
 	kMenuRepos,            // "Repos" menu title
 	kMenuAddRepo,          // "Add Repo..." menu item
 	kMenuRemoveRepo,       // "Remove Repo" submenu title
@@ -67,6 +69,8 @@ static const char* kTable[kStringCount][6] = {
 	/* kSortByName     */ {"Package name", "패키지 이름", "パッケージ名", "Nome pacchetto", "Nom du paquet", "Nombre del paquete"},
 	/* kSortByRepo     */ {"Repo", "저장소", "リポジトリ", "Repository", "Dépôt", "Repositorio"},
 	/* kNoDescription  */ {"No description available.", "설명이 없습니다.", "説明はありません。", "Nessuna descrizione disponibile.", "Aucune description disponible.", "No hay descripción disponible."},
+	/* kMenuFile            */ {"File", "파일", "ファイル", "File", "Fichier", "Archivo"},
+	/* kMenuQuit            */ {"Quit", "종료", "終了", "Esci", "Quitter", "Salir"},
 	/* kMenuRepos           */ {"Repos", "저장소", "リポジトリ", "Repository", "Dépôts", "Repositorios"},
 	/* kMenuAddRepo         */ {"Add Repo...", "저장소 추가...", "リポジトリを追加...", "Aggiungi repository...", "Ajouter un dépôt...", "Añadir repositorio..."},
 	/* kMenuRemoveRepo      */ {"Remove Repo", "저장소 삭제", "リポジトリを削除", "Rimuovi repository", "Supprimer un dépôt", "Eliminar repositorio"},

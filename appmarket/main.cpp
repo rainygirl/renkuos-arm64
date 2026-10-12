@@ -1053,6 +1053,14 @@ public:
 		fSortMenu->SetTargetForItems(this);
 
 		fMenuBar = new BMenuBar("menubar");
+
+		BMenu* fileMenu = new BMenu(T(kMenuFile));
+		BMenuItem* quitItem = new BMenuItem(T(kMenuQuit),
+			new BMessage(B_QUIT_REQUESTED), 'Q');
+		fileMenu->AddItem(quitItem);
+		quitItem->SetTarget(this);
+		fMenuBar->AddItem(fileMenu);
+
 		BMenu* repoMenu = new BMenu(T(kMenuRepos));
 		BMenuItem* addRepoItem = new BMenuItem(T(kMenuAddRepo),
 			new BMessage(kMsgShowAddRepo));
@@ -1078,8 +1086,11 @@ public:
 		fDescriptionView->SetViewUIColor(B_PANEL_BACKGROUND_COLOR);
 		BScrollView* descScroll = new BScrollView("description-scroll",
 			fDescriptionView, 0, false, true, B_FANCY_BORDER);
-		descScroll->SetExplicitMinSize(BSize(B_SIZE_UNSET, 70));
-		descScroll->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, 100));
+		// Tall enough for about four or five lines before the vertical
+		// scrollbar (already enabled -- see the BScrollView args above)
+		// actually has to do anything; was two lines' worth before.
+		descScroll->SetExplicitMinSize(BSize(B_SIZE_UNSET, 160));
+		descScroll->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, 220));
 
 		fStatus = new BStringView("status", T(kLoading));
 		fRefreshButton = new BButton("refresh", T(kRefresh),
