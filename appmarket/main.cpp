@@ -192,6 +192,19 @@ IsPackageInstalled(const BString& name)
 	return false;
 }
 
+// `pkgman add-repo` on a URL it already has registered asks an interactive
+// "overwrite? [yes/no]" question instead of just succeeding -- with no tty
+// attached (this runs via popen()), that prompt reads EOF forever and the
+// process never exits, hanging this whole refresh. `pkgman list-repos`
+// prints each repo's base-url, so checking that first avoids ever calling
+// add-repo on a URL it already knows about.
+static bool
+IsRepoKnown(const char* url)
+{
+	BString listing = RunCaptured("pkgman list-repos 2>/dev/null");
+	return listing.FindFirst(url) >= 0;
+}
+
 // How wide the "Repo" column is drawn, in pixels. Package names never
 // overlap it, regardless of how the BListView itself is resized -- this
 // is a fixed two-column layout, not something that reflows.
@@ -252,7 +265,8 @@ public:
 		fIcon(NULL),
 		fBusy(false),
 		fBusyInstall(false),
-		fButtonRect()
+		fButtonRect(),
+		fHovered(false)
 	{
 	}
 
@@ -291,6 +305,11 @@ public:
 		fBusyInstall = install;
 	}
 	bool IsButtonClickable() const { return sButtonsEnabled && !fBusy; }
+
+	// Whether the pointer is currently over this row's button -- see
+	// PackageListView::MouseMoved, the only thing that sets this.
+	bool IsHovered() const { return fHovered; }
+	void SetHovered(bool hovered) { fHovered = hovered; }
 
 	// Recomputed on every DrawItem() -- a row has to have been drawn at
 	// least once (true by the time a user could have clicked it) for this
@@ -502,7 +521,13 @@ public:
 			buttonFill = tint_color(background, B_DARKEN_2_TINT);
 			buttonTextColor = tint_color(background, B_DARKEN_4_TINT);
 		} else if (fInstalled) {
-			buttonFill = (rgb_color){ 198, 40, 40, 255 };
+			// Uninstall stays a neutral grey until the pointer is actually
+			// over it (see PackageListView::MouseMoved) -- red only shows
+			// up right as the user is about to click the destructive
+			// action, not just because the row happens to be installed.
+			buttonFill = fHovered
+				? (rgb_color){ 198, 40, 40, 255 }
+				: (rgb_color){ 158, 158, 158, 255 };
 			buttonTextColor = (rgb_color){ 255, 255, 255, 255 };
 		} else {
 			buttonFill = (rgb_color){ 33, 150, 243, 255 };
@@ -534,6 +559,7 @@ private:
 	bool fBusy;
 	bool fBusyInstall;
 	BRect fButtonRect;
+	bool fHovered;
 };
 
 bool PackageItem::sButtonsEnabled = true;
@@ -550,8 +576,19 @@ class PackageListView : public BListView {
 public:
 	PackageListView(const char* name)
 		:
-		BListView(name, B_SINGLE_SELECTION_LIST)
+		BListView(name, B_SINGLE_SELECTION_LIST),
+		fHoverIndex(-1)
 	{
+		// Every row's own drawing (text truncation, the button's position)
+		// depends on the row's actual width, not just its height -- but a
+		// plain BView, on a resize, only asks Draw() to repaint the newly
+		// exposed strip, not the rows that were already visible. Widening
+		// the window left every already-drawn row showing its old,
+		// narrower-frame content underneath the new blank strip rather
+		// than redrawing to match (looked like the list tearing itself
+		// apart, not an app_server/graphics-driver bug). This flag makes
+		// a resize invalidate the whole view instead of just the delta.
+		SetFlags(Flags() | B_FULL_UPDATE_ON_RESIZE);
 	}
 
 	void MouseDown(BPoint where)
@@ -569,40 +606,38 @@ public:
 		}
 		BListView::MouseDown(where);
 	}
-};
 
-// A plain two-label strip drawn above the list, aligned with PackageItem's
-// own column layout -- BListView has no header of its own.
-class ColumnHeaderView : public BView {
-public:
-	ColumnHeaderView()
-		:
-		BView("column-header", B_WILL_DRAW)
+	// Hovering the Uninstall button is the only thing that turns it red
+	// (see PackageItem::DrawItem) -- everywhere else it's a neutral grey,
+	// so the destructive color only shows up right as the user is about
+	// to click it. Tracked per-row on PackageItem itself (not here)
+	// since DrawItem is what actually reads it.
+	void MouseMoved(BPoint where, uint32 code, const BMessage* dragMessage)
 	{
-		SetViewUIColor(B_PANEL_BACKGROUND_COLOR);
-		SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, 20));
-		SetExplicitMinSize(BSize(B_SIZE_UNSET, 20));
+		int32 index = code != B_EXITED_VIEW ? IndexOf(where) : -1;
+		PackageItem* item = index >= 0 ? (PackageItem*)ItemAt(index) : NULL;
+		bool hovered = item != NULL && item->ButtonRect().Contains(where);
+
+		if (index != fHoverIndex) {
+			if (fHoverIndex >= 0) {
+				PackageItem* prev = (PackageItem*)ItemAt(fHoverIndex);
+				if (prev != NULL && prev->IsHovered()) {
+					prev->SetHovered(false);
+					InvalidateItem(fHoverIndex);
+				}
+			}
+			fHoverIndex = index;
+		}
+		if (item != NULL && item->IsHovered() != hovered) {
+			item->SetHovered(hovered);
+			InvalidateItem(index);
+		}
+
+		BListView::MouseMoved(where, code, dragMessage);
 	}
 
-	void Draw(BRect updateRect)
-	{
-		rgb_color background = ui_color(B_PANEL_BACKGROUND_COLOR);
-		SetHighColor(tint_color(background, B_DARKEN_1_TINT));
-		SetLowColor(background);
-		FillRect(Bounds());
-
-		font_height fh;
-		GetFontHeight(&fh);
-		float baseline = Bounds().top
-			+ (Bounds().Height() - (fh.ascent + fh.descent)) / 2.0f + fh.ascent;
-
-		SetHighColor(ui_color(B_PANEL_TEXT_COLOR));
-		DrawString(T(kColumnRepo), BPoint(6, baseline));
-		DrawString(T(kColumnPackage), BPoint(kRepoColumnWidth + 8, baseline));
-
-		StrokeLine(BPoint(Bounds().left, Bounds().bottom),
-			BPoint(Bounds().right, Bounds().bottom));
-	}
+private:
+	int32 fHoverIndex;
 };
 
 struct InstallJob {
@@ -1113,10 +1148,42 @@ OfferDesktopIcon(const BString& name)
 	desktop.CreateSymLink(displayName.String(), targetPath.String(), NULL);
 }
 
+// rust_bin's own REQUIRES includes gcc, binutils, gcc_syslibs_devel and
+// haiku_devel -- a native build toolchain this minimal image doesn't ship
+// and "RENKU Apps" doesn't carry either. Those four are vendored "Haiku
+// Project", not "RENKU", so package_repo flatly refuses to index them
+// alongside this repo's own R* packages (a mixed-vendor index is rejected
+// outright) -- hence the separate "RENKU System" repo that already
+// publishes exactly these four (see pkgman-repo/README.md). Its own
+// `haiku` package lacks this image's media-stack fixes, though, so it's
+// deliberately never one of R AppMarket's built-in repos: registering it
+// permanently would risk a later, unrelated rchromium install silently
+// pulling that lesser `haiku` in as a dependency. Added here just long
+// enough to resolve rust_bin's own dependencies, then dropped again --
+// confirmed safe (the already-installed `haiku` already satisfies
+// haiku_devel's own requirement, so nothing about the base system changes)
+// and confirmed to leave rust_bin/gcc/binutils/etc. installed and working
+// after the repo is gone.
+static const char* kSystemRepoURL = "https://pkgman.rainygirl.com/arm64-system";
+static const char* kSystemRepoName = "RENKU System";
+
 static int32
 InstallThreadFunc(void* data)
 {
 	InstallJob* job = (InstallJob*)data;
+
+	bool addedSystemRepo = false;
+	if (job->install && job->name == "rust_bin" && !IsRepoKnown(kSystemRepoURL)) {
+		BMessage repoLog(kMsgInstallLog);
+		repoLog.AddString("text",
+			"rust_bin needs a native toolchain -- adding the RENKU System repo for it...");
+		job->target.SendMessage(&repoLog);
+
+		BString addCmd("pkgman add-repo '");
+		addCmd << kSystemRepoURL << "' < /dev/null >/dev/null 2>&1";
+		RunCaptured(addCmd.String());
+		addedSystemRepo = IsRepoKnown(kSystemRepoURL);
+	}
 
 	BString cmd("pkgman ");
 	cmd << (job->install ? "install" : "uninstall") << " -y '";
@@ -1133,6 +1200,19 @@ InstallThreadFunc(void* data)
 	job->target.SendMessage(&startLog);
 
 	BString output = RunCapturedStreaming(cmd.String(), job->target);
+
+	if (addedSystemRepo) {
+		BMessage dropLog(kMsgInstallLog);
+		dropLog.AddString("text", "Removing the RENKU System repo again...");
+		job->target.SendMessage(&dropLog);
+
+		// drop-repo asks the same kind of interactive confirmation add-repo
+		// does -- "echo yes |" answers it instead of leaving the prompt to
+		// reread EOF forever (see IsRepoKnown's own note on add-repo).
+		BString dropCmd("echo yes | pkgman drop-repo '");
+		dropCmd << kSystemRepoName << "' >/dev/null 2>&1";
+		RunCaptured(dropCmd.String());
+	}
 
 	bool success = IsPackageInstalled(job->name) == job->install;
 	if (success && job->install)
@@ -1187,20 +1267,6 @@ AppendUniqueLines(const BString& listing, const char* repo,
 		p = nl + 1;
 	}
 }
-
-// `pkgman add-repo` on a URL it already has registered asks an interactive
-// "overwrite? [yes/no]" question instead of just succeeding -- with no tty
-// attached (this runs via popen()), that prompt reads EOF forever and the
-// process never exits, hanging this whole refresh. `pkgman list-repos`
-// prints each repo's base-url, so checking that first avoids ever calling
-// add-repo on a URL it already knows about.
-static bool
-IsRepoKnown(const char* url)
-{
-	BString listing = RunCaptured("pkgman list-repos 2>/dev/null");
-	return listing.FindFirst(url) >= 0;
-}
-
 
 static int32
 RefreshThreadFunc(void* data)
@@ -1328,7 +1394,6 @@ public:
 		fListView->SetSelectionMessage(new BMessage(kMsgSelectionChanged));
 		BScrollView* scroll = new BScrollView("scroll", fListView,
 			0, false, true);
-		fHeader = new ColumnHeaderView();
 
 		fFilterMenu = new BPopUpMenu(T(kFilterAllRepos));
 		fFilterMenu->AddItem(new BMenuItem(T(kFilterAllRepos),
@@ -1399,7 +1464,6 @@ public:
 					.Add(fSortField)
 					.AddGlue()
 				.End()
-				.Add(fHeader)
 				.Add(scroll, 3)
 				.Add(descScroll, 1)
 				.AddGroup(B_HORIZONTAL, 10)
@@ -1869,7 +1933,6 @@ private:
 	}
 
 	BListView* fListView;
-	ColumnHeaderView* fHeader;
 	BPopUpMenu* fFilterMenu;
 	BMenuField* fFilterField;
 	BPopUpMenu* fSortMenu;
