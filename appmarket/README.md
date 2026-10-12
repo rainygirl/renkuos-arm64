@@ -2,7 +2,7 @@
 
 **English** · [한국어](README.ko.md) · [日本語](README.ja.md) · [Italiano](README.it.md) · [Français](README.fr.md) · [Español](README.es.md)
 
-R AppMarket lets you browse and install RENKU's R* apps from a window, instead of typing `pkgman` commands in Terminal.
+R AppMarket lets you browse and install every app in each repository it knows about -- RENKU's own R* apps among them -- from a window, instead of typing `pkgman` commands in Terminal.
 
 ![R AppMarket](screenshot.png)
 
