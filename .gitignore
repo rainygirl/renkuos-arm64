@@ -6,5 +6,9 @@
 serial.log
 serial-bridged.log
 
+# Cross-compiled per-architecture binaries -- regenerate with
+# appmarket/tools/cross-build.sh rather than committing these.
+appmarket/dist/
+
 # macOS
 .DS_Store

@@ -4,13 +4,20 @@
 
 R AppMarket lets you browse and install RENKU's R* apps from a window, instead of typing `pkgman` commands in Terminal.
 
+![R AppMarket](screenshot.png)
+
 ## Install
 
+Available for **arm64**, **x86_64**, and 32-bit **x86** (gcc2 hybrid).
+
 1. Open **Terminal**: click the feather menu at the top right of the screen, then **Applications > Terminal**.
-2. Copy these three lines, paste them into Terminal, and press **Enter**.
+2. Add the repository for your architecture (not sure which? `ls /system/packages/haiku-*.hpkg` tells you), then install:
 
    ```sh
-   pkgman add-repo https://pkgman.rainygirl.com/arm64
+   pkgman add-repo https://pkgman.rainygirl.com/arm64      # arm64
+   pkgman add-repo https://pkgman.rainygirl.com/x86_64     # 64-bit x86
+   pkgman add-repo https://pkgman.rainygirl.com/x86_gcc2   # 32-bit x86 (gcc2 hybrid)
+
    pkgman refresh
    pkgman install rappmarket
    ```

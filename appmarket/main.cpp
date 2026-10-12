@@ -24,7 +24,6 @@
 #include <Messenger.h>
 #include <Node.h>
 #include <NodeInfo.h>
-#include <ObjectList.h>
 #include <Path.h>
 #include <PopUpMenu.h>
 #include <ScrollView.h>
@@ -43,9 +42,58 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <vector>
 
 #include "Strings.h"
 using namespace rappmarket;
+
+// Stands in for BObjectList<T, Owning> -- RENKU arm64 is built against a
+// Haiku nightly new enough that BObjectList takes ownership as a second
+// template argument, while the official R1 Beta 4 headers the x86_64/x86
+// cross-builds use still take it as a runtime constructor bool instead (an
+// upstream Haiku API change this app predates on those architectures).
+// Rather than special-case two incompatible BObjectList signatures, this
+// covers the handful of operations the file actually needs (add, index,
+// count, remove-without-deleting, clear, sort) over a plain std::vector, and
+// compiles identically everywhere.
+template<class T, bool Owning = false>
+class PtrList {
+public:
+	PtrList(int32 reserve = 8) { fItems.reserve(reserve); }
+	~PtrList() { MakeEmpty(); }
+
+	int32 CountItems() const { return (int32)fItems.size(); }
+	T* ItemAt(int32 i) const { return fItems[i]; }
+	void AddItem(T* item) { fItems.push_back(item); }
+
+	// Always just detaches, whether or not this list owns its items -- the
+	// same as BObjectList's own RemoveItemAt, so a caller that wants the
+	// detached item deleted (or kept) does that itself either way.
+	T* RemoveItemAt(int32 i)
+	{
+		T* item = fItems[i];
+		fItems.erase(fItems.begin() + i);
+		return item;
+	}
+
+	void MakeEmpty()
+	{
+		if (Owning) {
+			for (size_t i = 0; i < fItems.size(); i++)
+				delete fItems[i];
+		}
+		fItems.clear();
+	}
+
+	void SortItems(int (*compare)(const T*, const T*))
+	{
+		std::sort(fItems.begin(), fItems.end(),
+			[compare](T* a, T* b) { return compare(a, b) < 0; });
+	}
+
+private:
+	std::vector<T*> fItems;
+};
 
 static const char* kPackagesDir = "/boot/system/packages";
 
@@ -664,7 +712,7 @@ CustomReposSettingsPath()
 }
 
 static void
-LoadCustomRepos(BObjectList<BString, true>* repos)
+LoadCustomRepos(PtrList<BString, true>* repos)
 {
 	BString path = CustomReposSettingsPath();
 	if (path.Length() == 0)
@@ -684,7 +732,7 @@ LoadCustomRepos(BObjectList<BString, true>* repos)
 }
 
 static void
-SaveCustomRepos(const BObjectList<BString, true>& repos)
+SaveCustomRepos(const PtrList<BString, true>& repos)
 {
 	BString path = CustomReposSettingsPath();
 	if (path.Length() == 0)
@@ -705,7 +753,7 @@ struct RefreshJob {
 	// it. Built by _Refresh() from kRepos (filtered to the current arch)
 	// plus whatever custom repos the user has added, so the thread itself
 	// never has to know about either source.
-	BObjectList<BString, true>* repoUrls;
+	PtrList<BString, true>* repoUrls;
 };
 
 // `pkgman info` reads straight out of the local repo index this app
@@ -817,7 +865,7 @@ ResolveHpkgFilename(const BString& repoUrl, const BString& name)
 static BString
 FindMainBinaryPath(const BString& listOutput)
 {
-	BObjectList<BString, true> appsPaths(16);
+	PtrList<BString, true> appsPaths(16);
 	const char* p = listOutput.String();
 	while (*p != '\0') {
 		const char* nl = strchr(p, '\n');
@@ -1577,7 +1625,7 @@ private:
 	{
 		fStatus->SetText(T(kFetchingList));
 
-		BObjectList<BString, true>* urls = new BObjectList<BString, true>(8);
+		PtrList<BString, true>* urls = new PtrList<BString, true>(8);
 		const char* arch = CurrentArch();
 		for (int32 i = 0; i < kRepoCount; i++) {
 			if (strcmp(kRepos[i].arch, arch) == 0)
@@ -1729,7 +1777,7 @@ private:
 		fFilterMenu->AddItem(allItem);
 		allItem->SetTarget(this);
 
-		BObjectList<BString, true> seen(8);
+		PtrList<BString, true> seen(8);
 		for (int32 i = 0; i < fAllPackages.CountItems(); i++) {
 			const BString& repo = fAllPackages.ItemAt(i)->Repo();
 			bool found = false;
@@ -1942,7 +1990,7 @@ private:
 	BTextView* fDescriptionView;
 	BStringView* fStatus;
 
-	BObjectList<PackageItem, true> fAllPackages;
+	PtrList<PackageItem, true> fAllPackages;
 	SortMode fSortMode;
 
 	// True while some row's install/uninstall job is running -- see
@@ -1951,12 +1999,12 @@ private:
 
 	// Repos the user has added at runtime (see AddRepoWindow), persisted
 	// via SaveCustomRepos/LoadCustomRepos -- kRepos itself never changes.
-	BObjectList<BString, true> fCustomRepos;
+	PtrList<BString, true> fCustomRepos;
 
 	// Background icon prefetch (see _QueueIconFetches/_PumpIconQueue).
 	// fIconQueue holds borrowed pointers only -- fAllPackages above is
 	// what owns every PackageItem.
-	BObjectList<PackageItem, false> fIconQueue;
+	PtrList<PackageItem, false> fIconQueue;
 	int32 fActiveIconFetches;
 	int32 fIconGeneration;
 };
