@@ -15,6 +15,8 @@ enum StringKey {
 	kFetchingList,
 	kCouldNotReach,
 	kPackagesCount,   // "%d packages"
+	kPackagesCountCapped, // "Showing %d of %d packages" -- shown, then total matched
+	kSearchLabel,
 	kInstalled,       // label inside the rounded "installed" row badge
 	kInstall,
 	kUninstall,
@@ -54,6 +56,8 @@ static const char* kTable[kStringCount][6] = {
 	/* kFetchingList    */ {"Fetching package list...", "패키지 목록을 가져오는 중...", "パッケージ一覧を取得中...", "Recupero elenco pacchetti...", "Récupération de la liste des paquets...", "Obteniendo la lista de paquetes..."},
 	/* kCouldNotReach  */ {"Could not reach the repository.", "저장소에 연결할 수 없습니다.", "リポジトリに接続できませんでした。", "Impossibile raggiungere il repository.", "Impossible de joindre le dépôt.", "No se pudo contactar con el repositorio."},
 	/* kPackagesCount  */ {"%d packages", "패키지 %d개", "%d個のパッケージ", "%d pacchetti", "%d paquets", "%d paquetes"},
+	/* kPackagesCountCapped */ {"Showing %d of %d packages", "%d개 표시 중 (전체 %d개)", "%d件表示中 (全%d件)", "Mostrati %d di %d pacchetti", "Affichage de %d sur %d paquets", "Mostrando %d de %d paquetes"},
+	/* kSearchLabel    */ {"Search:", "검색:", "検索:", "Cerca:", "Recherche :", "Buscar:"},
 	/* kInstalled      */ {"installed", "설치됨", "インストール済み", "installato", "installé", "instalado"},
 	/* kInstall        */ {"Install", "설치", "インストール", "Installa", "Installer", "Instalar"},
 	/* kUninstall      */ {"Uninstall", "제거", "アンインストール", "Disinstalla", "Désinstaller", "Desinstalar"},
@@ -129,6 +133,23 @@ TFInt(StringKey key, int value)
 	BString valueStr;
 	valueStr << value;
 	result.ReplaceFirst("%d", valueStr);
+	return result;
+}
+
+// Replaces the first two "%d" placeholders, in order. Every translation of
+// a two-placeholder key is written so its first %d is value1 and its
+// second is value2, even where the language's own word order would put
+// the numbers the other way round -- see kPackagesCountCapped.
+inline BString
+TFInt2(StringKey key, int value1, int value2)
+{
+	BString result(T(key));
+	BString v1;
+	v1 << value1;
+	result.ReplaceFirst("%d", v1);
+	BString v2;
+	v2 << value2;
+	result.ReplaceFirst("%d", v2);
 	return result;
 }
 

@@ -179,6 +179,7 @@ static const uint32 kMsgAction = 'RAct';
 static const uint32 kMsgSelectionChanged = 'RSel';
 static const uint32 kMsgFilterChanged = 'RFlt';
 static const uint32 kMsgSortChanged = 'RSrt';
+static const uint32 kMsgSearchChanged = 'RSch';
 static const uint32 kMsgIconDone = 'RIcn';
 static const uint32 kMsgShowAddRepo = 'RAdS';
 static const uint32 kMsgAddRepo = 'RAdd';
@@ -197,6 +198,10 @@ static const off_t kMaxIconFetchSize = 10 * 1024 * 1024;
 // Capping how many of the real .hpkg downloads run concurrently keeps
 // the rest queued instead of all competing at once.
 static const int32 kMaxConcurrentIconFetches = 3;
+
+// Upper bound on how many rows _RebuildVisibleList() ever hands to
+// fListView at once -- see its own comment for why.
+static const int32 kMaxVisiblePackages = 200;
 
 enum SortMode { kSortByPackage, kSortByRepoName };
 
@@ -1456,6 +1461,14 @@ public:
 		fFilterMenu->SetTargetForItems(this);
 		fSortMenu->SetTargetForItems(this);
 
+		// SetModificationMessage, not the default invocation message --
+		// that only fires on Enter/focus-loss, and a search box is
+		// expected to filter live as each character is typed.
+		fSearchField = new BTextControl("search", T(kSearchLabel), "",
+			new BMessage(kMsgSearchChanged));
+		fSearchField->SetModificationMessage(new BMessage(kMsgSearchChanged));
+		fSearchField->SetExplicitMaxSize(BSize(220, B_SIZE_UNSET));
+
 		fMenuBar = new BMenuBar("menubar");
 
 		BMenu* fileMenu = new BMenu(T(kMenuFile));
@@ -1511,6 +1524,7 @@ public:
 					.Add(fFilterField)
 					.Add(fSortField)
 					.AddGlue()
+					.Add(fSearchField)
 				.End()
 				.Add(scroll, 3)
 				.Add(descScroll, 1)
@@ -1595,6 +1609,10 @@ public:
 			case kMsgSortChanged:
 				fSortMode = fSortMenu->FindMarkedIndex() == 1
 					? kSortByRepoName : kSortByPackage;
+				_RebuildVisibleList();
+				break;
+
+			case kMsgSearchChanged:
 				_RebuildVisibleList();
 				break;
 
@@ -1803,13 +1821,22 @@ private:
 	}
 
 	// Rebuilds fListView's visible contents from fAllPackages according to
-	// the current filter + sort selection. Never deletes a PackageItem --
-	// fAllPackages owns all of them regardless of which ones are visible.
+	// the current filter + search + sort selection. Never deletes a
+	// PackageItem -- fAllPackages owns all of them regardless of which ones
+	// are visible. Capped at kMaxVisiblePackages: a repo filter or search
+	// can still leave hundreds of matches, and there's no reason to hand
+	// BListView all of them at once when only the first couple of screens'
+	// worth could ever be seen without scrolling past what the search was
+	// narrowing down in the first place.
 	void _RebuildVisibleList()
 	{
 		BMenuItem* marked = fFilterMenu->FindMarked();
 		BString filterRepo = marked != NULL ? marked->Label() : "";
 		bool showAll = marked == NULL || filterRepo == T(kFilterAllRepos);
+
+		BString search(fSearchField->Text());
+		search.Trim();
+		bool hasSearch = search.Length() > 0;
 
 		if (fSortMode == kSortByRepoName)
 			fAllPackages.SortItems(_CompareByRepo);
@@ -1819,15 +1846,26 @@ private:
 		for (int32 i = fListView->CountItems() - 1; i >= 0; i--)
 			fListView->RemoveItem(i);
 
+		int32 matched = 0;
 		int32 shown = 0;
 		for (int32 i = 0; i < fAllPackages.CountItems(); i++) {
 			PackageItem* item = fAllPackages.ItemAt(i);
-			if (showAll || item->Repo() == filterRepo) {
+			if (!showAll && item->Repo() != filterRepo)
+				continue;
+			if (hasSearch && item->PackageName().IFindFirst(search) < 0
+					&& item->ShortDescription().IFindFirst(search) < 0)
+				continue;
+
+			matched++;
+			if (shown < kMaxVisiblePackages) {
 				fListView->AddItem(item);
 				shown++;
 			}
 		}
-		fStatus->SetText(TFInt(kPackagesCount, shown).String());
+
+		fStatus->SetText(shown < matched
+			? TFInt2(kPackagesCountCapped, shown, matched).String()
+			: TFInt(kPackagesCount, matched).String());
 	}
 
 	static int _CompareByPackage(const PackageItem* a, const PackageItem* b)
@@ -1985,6 +2023,7 @@ private:
 	BMenuField* fFilterField;
 	BPopUpMenu* fSortMenu;
 	BMenuField* fSortField;
+	BTextControl* fSearchField;
 	BMenuBar* fMenuBar;
 	BMenu* fRemoveRepoMenu;
 	BTextView* fDescriptionView;
