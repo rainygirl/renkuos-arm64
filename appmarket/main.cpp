@@ -26,6 +26,7 @@
 #include <ScrollView.h>
 #include <String.h>
 #include <StringView.h>
+#include <TextView.h>
 #include <View.h>
 #include <Window.h>
 
@@ -108,6 +109,7 @@ static const uint32 kMsgRefresh = 'RRef';
 static const uint32 kMsgSelectionChanged = 'RSel';
 static const uint32 kMsgFilterChanged = 'RFlt';
 static const uint32 kMsgSortChanged = 'RSrt';
+static const uint32 kMsgInfoDone = 'RInf';
 
 enum SortMode { kSortByPackage, kSortByRepoName };
 
@@ -156,9 +158,9 @@ IsPackageInstalled(const BString& name)
 // overlap either of the first two, regardless of how the BListView
 // itself is resized -- this is a fixed layout, not something that
 // reflows.
-static const float kIconColumnWidth = 24.0f;
+static const float kIconColumnWidth = 32.0f;
 static const float kRepoColumnWidth = 280.0f;
-static const float kIconSize = 16.0f;
+static const float kIconSize = 24.0f;
 
 // A plain row: a generic app icon, repo name, then package name (plus an
 // "(installed)" suffix), with a vertical rule between the text columns.
@@ -303,6 +305,36 @@ struct InstallJob {
 struct RefreshJob {
 	BMessenger target;
 };
+
+struct InfoJob {
+	BMessenger target;
+	BString name;
+};
+
+// `pkgman info` reads straight out of the local repo index this app
+// already fetched via add-repo/refresh -- no network round-trip, no need
+// to download the package itself just to read its description.
+static int32
+InfoThreadFunc(void* data)
+{
+	InfoJob* job = (InfoJob*)data;
+
+	BString cmd("pkgman info '");
+	BString escaped(job->name);
+	escaped.ReplaceAll("'", "'\\''");
+	cmd << escaped << "' 2>&1";
+
+	BString output = RunCaptured(cmd.String());
+	output.Trim();
+
+	BMessage done(kMsgInfoDone);
+	done.AddString("name", job->name);
+	done.AddString("output", output);
+	job->target.SendMessage(&done);
+
+	delete job;
+	return 0;
+}
 
 static int32
 InstallThreadFunc(void* data)
@@ -458,6 +490,16 @@ public:
 		fFilterMenu->SetTargetForItems(this);
 		fSortMenu->SetTargetForItems(this);
 
+		fDescriptionView = new BTextView("description");
+		fDescriptionView->MakeEditable(false);
+		fDescriptionView->SetWordWrap(true);
+		fDescriptionView->SetInsets(4, 4, 4, 4);
+		fDescriptionView->SetViewUIColor(B_PANEL_BACKGROUND_COLOR);
+		BScrollView* descScroll = new BScrollView("description-scroll",
+			fDescriptionView, 0, false, true, B_FANCY_BORDER);
+		descScroll->SetExplicitMinSize(BSize(B_SIZE_UNSET, 70));
+		descScroll->SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, 100));
+
 		fStatus = new BStringView("status", T(kLoading));
 		fRefreshButton = new BButton("refresh", T(kRefresh),
 			new BMessage(kMsgRefresh));
@@ -485,7 +527,8 @@ public:
 				.AddGlue()
 			.End()
 			.Add(fHeader)
-			.Add(scroll)
+			.Add(scroll, 3)
+			.Add(descScroll, 1)
 			.AddGroup(B_HORIZONTAL, 10)
 				.Add(fStatus)
 				.AddGlue()
@@ -512,8 +555,12 @@ public:
 				PackageItem* item
 					= (PackageItem*)fListView->ItemAt(fListView->CurrentSelection());
 				fActionButton->SetEnabled(item != NULL);
-				if (item != NULL)
+				if (item != NULL) {
 					fActionButton->SetLabel(item->Installed() ? T(kUninstall) : T(kInstall));
+					_FetchDescription(item->PackageName());
+				} else {
+					fDescriptionView->SetText("");
+				}
 				break;
 			}
 
@@ -528,6 +575,10 @@ public:
 
 			case kMsgOpDone:
 				_HandleOpDone(message);
+				break;
+
+			case kMsgInfoDone:
+				_HandleInfoDone(message);
 				break;
 
 			case kMsgFilterChanged:
@@ -720,15 +771,53 @@ private:
 		fStatus->SetText(TF(key, name.String()).String());
 	}
 
+	// `pkgman info` reads the local repo index, so this is fast, but it's
+	// still a subprocess -- kept off the UI thread like every other
+	// pkgman/curl call here. fPendingInfoRequest guards against a stale
+	// reply landing after the user has already selected something else.
+	void _FetchDescription(const BString& name)
+	{
+		fPendingInfoRequest = name;
+		fDescriptionView->SetText(T(kLoading));
+
+		InfoJob* job = new InfoJob;
+		job->target = BMessenger(this);
+		job->name = name;
+		thread_id t = spawn_thread(InfoThreadFunc, "appmarket-info",
+			B_NORMAL_PRIORITY, job);
+		if (t >= 0)
+			resume_thread(t);
+		else
+			delete job;
+	}
+
+	void _HandleInfoDone(BMessage* message)
+	{
+		BString name, output;
+		message->FindString("name", &name);
+		message->FindString("output", &output);
+
+		// The user may have selected a different package while this was
+		// in flight -- only apply it if it's still the one showing.
+		if (name != fPendingInfoRequest)
+			return;
+
+		if (output.Length() == 0)
+			output = T(kNoDescription);
+		fDescriptionView->SetText(output.String());
+	}
+
 	BListView* fListView;
 	ColumnHeaderView* fHeader;
 	BPopUpMenu* fFilterMenu;
 	BMenuField* fFilterField;
 	BPopUpMenu* fSortMenu;
 	BMenuField* fSortField;
+	BTextView* fDescriptionView;
 	BStringView* fStatus;
 	BButton* fRefreshButton;
 	BButton* fActionButton;
+	BString fPendingInfoRequest;
 
 	BObjectList<PackageItem, true> fAllPackages;
 	SortMode fSortMode;

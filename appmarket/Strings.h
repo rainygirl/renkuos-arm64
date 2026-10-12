@@ -31,6 +31,7 @@ enum StringKey {
 	kSortLabel,
 	kSortByName,
 	kSortByRepo,
+	kNoDescription,
 	kStringCount
 };
 
@@ -57,6 +58,7 @@ static const char* kTable[kStringCount][6] = {
 	/* kSortLabel      */ {"Sort:", "정렬:", "並べ替え:", "Ordina:", "Trier :", "Ordenar:"},
 	/* kSortByName     */ {"Package name", "패키지 이름", "パッケージ名", "Nome pacchetto", "Nom du paquet", "Nombre del paquete"},
 	/* kSortByRepo     */ {"Repo", "저장소", "リポジトリ", "Repository", "Dépôt", "Repositorio"},
+	/* kNoDescription  */ {"No description available.", "설명이 없습니다.", "説明はありません。", "Nessuna descrizione disponibile.", "Aucune description disponible.", "No hay descripción disponible."},
 };
 
 static const char* kLanguageCodes[6] = {"en", "ko", "ja", "it", "fr", "es"};
