@@ -11,17 +11,23 @@
 #include <Directory.h>
 #include <Entry.h>
 #include <LayoutBuilder.h>
+#include <ListItem.h>
 #include <ListView.h>
+#include <MenuField.h>
+#include <MenuItem.h>
 #include <Message.h>
 #include <Messenger.h>
+#include <ObjectList.h>
+#include <PopUpMenu.h>
 #include <ScrollView.h>
 #include <String.h>
-#include <StringItem.h>
 #include <StringView.h>
+#include <View.h>
 #include <Window.h>
 
 #include <OS.h>
 
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 
@@ -78,6 +84,10 @@ static const uint32 kMsgOpDone = 'ROpD';
 static const uint32 kMsgAction = 'RAct';
 static const uint32 kMsgRefresh = 'RRef';
 static const uint32 kMsgSelectionChanged = 'RSel';
+static const uint32 kMsgFilterChanged = 'RFlt';
+static const uint32 kMsgSortChanged = 'RSrt';
+
+enum SortMode { kSortByPackage, kSortByRepoName };
 
 // Runs a shell command and returns its stdout, trimmed of a trailing
 // newline. Used only for the fixed, non-user-controlled commands below --
@@ -119,44 +129,115 @@ IsPackageInstalled(const BString& name)
 	return false;
 }
 
-class PackageItem : public BStringItem {
+// How wide the "Repo" column is drawn, in pixels. Package names never
+// overlap it, regardless of how the BListView itself is resized -- this
+// is a fixed two-column layout, not something that reflows.
+static const float kRepoColumnWidth = 90.0f;
+
+// A plain two-column row: repo name on the left, package name (plus an
+// "(installed)" suffix) on the right, with a vertical rule between them.
+// BStringItem can't do separate cells at all -- it is exactly one string
+// -- so this draws itself directly instead of just holding display text.
+class PackageItem : public BListItem {
 public:
 	PackageItem(const BString& name, const BString& repo, bool installed)
 		:
-		BStringItem(""),
+		BListItem(),
 		fName(name),
 		fRepo(repo),
 		fInstalled(installed)
 	{
-		_UpdateText();
 	}
 
 	const BString& PackageName() const { return fName; }
+	const BString& Repo() const { return fRepo; }
 	bool Installed() const { return fInstalled; }
-	void SetInstalled(bool installed)
+	void SetInstalled(bool installed) { fInstalled = installed; }
+
+	void Update(BView* owner, const BFont* font)
 	{
-		fInstalled = installed;
-		_UpdateText();
+		BListItem::Update(owner, font);
+		font_height fh;
+		font->GetHeight(&fh);
+		SetHeight(ceilf(fh.ascent + fh.descent + fh.leading) + 6.0f);
 	}
 
-private:
-	void _UpdateText()
+	void DrawItem(BView* owner, BRect frame, bool complete)
 	{
-		// "[Repo] name" -- the repo tag comes first since several repos can
-		// (in principle) list a package with the same name, and this is
-		// the only place that distinction is visible to the user.
-		BString text("[");
-		text << fRepo << "] " << fName;
+		rgb_color background = IsSelected()
+			? ui_color(B_LIST_SELECTED_BACKGROUND_COLOR)
+			: ui_color(B_LIST_BACKGROUND_COLOR);
+		owner->SetLowColor(background);
+		owner->SetHighColor(background);
+		owner->FillRect(frame);
+
+		font_height fh;
+		owner->GetFontHeight(&fh);
+		float baseline = frame.top
+			+ (frame.Height() - (fh.ascent + fh.descent)) / 2.0f + fh.ascent;
+
+		rgb_color textColor = IsSelected()
+			? ui_color(B_LIST_SELECTED_ITEM_TEXT_COLOR)
+			: ui_color(B_LIST_ITEM_TEXT_COLOR);
+		owner->SetHighColor(textColor);
+		owner->SetLowColor(background);
+
+		owner->DrawString(fRepo.String(), BPoint(frame.left + 6, baseline));
+
+		rgb_color ruleColor = tint_color(background, B_DARKEN_1_TINT);
+		owner->SetHighColor(ruleColor);
+		owner->StrokeLine(
+			BPoint(frame.left + kRepoColumnWidth, frame.top),
+			BPoint(frame.left + kRepoColumnWidth, frame.bottom));
+
+		owner->SetHighColor(textColor);
+		BString text(fName);
 		if (fInstalled) {
 			text << "  ";
 			text << T(kInstalled);
 		}
-		SetText(text.String());
+		owner->DrawString(text.String(),
+			BPoint(frame.left + kRepoColumnWidth + 8, baseline));
 	}
 
+private:
 	BString fName;
 	BString fRepo;
 	bool fInstalled;
+};
+
+// A plain two-label strip drawn above the list, aligned with PackageItem's
+// own column layout -- BListView has no header of its own.
+class ColumnHeaderView : public BView {
+public:
+	ColumnHeaderView()
+		:
+		BView("column-header", B_WILL_DRAW)
+	{
+		SetViewUIColor(B_PANEL_BACKGROUND_COLOR);
+		SetExplicitMaxSize(BSize(B_SIZE_UNLIMITED, 20));
+		SetExplicitMinSize(BSize(B_SIZE_UNSET, 20));
+	}
+
+	void Draw(BRect updateRect)
+	{
+		rgb_color background = ui_color(B_PANEL_BACKGROUND_COLOR);
+		SetHighColor(tint_color(background, B_DARKEN_1_TINT));
+		SetLowColor(background);
+		FillRect(Bounds());
+
+		font_height fh;
+		GetFontHeight(&fh);
+		float baseline = Bounds().top
+			+ (Bounds().Height() - (fh.ascent + fh.descent)) / 2.0f + fh.ascent;
+
+		SetHighColor(ui_color(B_PANEL_TEXT_COLOR));
+		DrawString(T(kColumnRepo), BPoint(6, baseline));
+		DrawString(T(kColumnPackage), BPoint(kRepoColumnWidth + 8, baseline));
+
+		StrokeLine(BPoint(Bounds().left, Bounds().bottom),
+			BPoint(Bounds().right, Bounds().bottom));
+	}
 };
 
 struct InstallJob {
@@ -286,12 +367,28 @@ public:
 	AppMarketWindow()
 		:
 		BWindow(BRect(100, 100, 700, 760), T(kWindowTitle), B_TITLED_WINDOW,
-			B_ASYNCHRONOUS_CONTROLS)
+			B_ASYNCHRONOUS_CONTROLS),
+		fAllPackages(20),
+		fSortMode(kSortByPackage)
 	{
 		fListView = new BListView("packages", B_SINGLE_SELECTION_LIST);
 		fListView->SetSelectionMessage(new BMessage(kMsgSelectionChanged));
 		BScrollView* scroll = new BScrollView("scroll", fListView,
 			0, false, true);
+		fHeader = new ColumnHeaderView();
+
+		fFilterMenu = new BPopUpMenu(T(kFilterAllRepos));
+		fFilterMenu->AddItem(new BMenuItem(T(kFilterAllRepos),
+			new BMessage(kMsgFilterChanged)));
+		fFilterField = new BMenuField("repo-filter", T(kFilterLabel), fFilterMenu);
+
+		fSortMenu = new BPopUpMenu(T(kSortByName));
+		fSortMenu->AddItem(new BMenuItem(T(kSortByName), new BMessage(kMsgSortChanged)));
+		fSortMenu->AddItem(new BMenuItem(T(kSortByRepo), new BMessage(kMsgSortChanged)));
+		fSortMenu->ItemAt(0)->SetMarked(true);
+		fSortField = new BMenuField("sort-by", T(kSortLabel), fSortMenu);
+		fFilterMenu->SetTargetForItems(this);
+		fSortMenu->SetTargetForItems(this);
 
 		fStatus = new BStringView("status", T(kLoading));
 		fRefreshButton = new BButton("refresh", T(kRefresh),
@@ -314,6 +411,12 @@ public:
 		// first time this was tried).
 		BLayoutBuilder::Group<>(this, B_VERTICAL, 10)
 			.SetInsets(10)
+			.AddGroup(B_HORIZONTAL, 10)
+				.Add(fFilterField)
+				.Add(fSortField)
+				.AddGlue()
+			.End()
+			.Add(fHeader)
 			.Add(scroll)
 			.AddGroup(B_HORIZONTAL, 10)
 				.Add(fStatus)
@@ -359,6 +462,16 @@ public:
 				_HandleOpDone(message);
 				break;
 
+			case kMsgFilterChanged:
+				_RebuildVisibleList();
+				break;
+
+			case kMsgSortChanged:
+				fSortMode = fSortMenu->FindMarkedIndex() == 1
+					? kSortByRepoName : kSortByPackage;
+				_RebuildVisibleList();
+				break;
+
 			default:
 				BWindow::MessageReceived(message);
 		}
@@ -390,16 +503,102 @@ private:
 			return;
 		}
 
-		fListView->MakeEmpty();
+		// fListView only ever holds pointers borrowed from fAllPackages (see
+		// _RebuildVisibleList) -- clear it with RemoveItem(int32), which
+		// does not delete, never MakeEmpty(), which does.
+		for (int32 i = fListView->CountItems() - 1; i >= 0; i--)
+			fListView->RemoveItem(i);
+		fAllPackages.MakeEmpty();
+
 		BString name, repo;
-		int32 count = 0;
 		for (int32 i = 0; message->FindString("package", i, &name) == B_OK; i++) {
 			message->FindString("repo", i, &repo);
-			fListView->AddItem(
+			fAllPackages.AddItem(
 				new PackageItem(name, repo, IsPackageInstalled(name)));
-			count++;
 		}
-		fStatus->SetText(TFInt(kPackagesCount, count).String());
+
+		_RebuildRepoFilterMenu();
+		_RebuildVisibleList();
+	}
+
+	// Repopulates the filter dropdown from whichever repos actually showed
+	// up in this refresh (not from kRepos -- a repo that matched the
+	// architecture but came back empty shouldn't offer an empty filter).
+	void _RebuildRepoFilterMenu()
+	{
+		BMenuItem* marked = fFilterMenu->FindMarked();
+		BString previousSelection = marked != NULL ? marked->Label() : "";
+
+		for (int32 i = fFilterMenu->CountItems() - 1; i >= 0; i--)
+			delete fFilterMenu->RemoveItem(i);
+
+		BMenuItem* allItem = new BMenuItem(T(kFilterAllRepos),
+			new BMessage(kMsgFilterChanged));
+		fFilterMenu->AddItem(allItem);
+		allItem->SetTarget(this);
+
+		BObjectList<BString, true> seen(8);
+		for (int32 i = 0; i < fAllPackages.CountItems(); i++) {
+			const BString& repo = fAllPackages.ItemAt(i)->Repo();
+			bool found = false;
+			for (int32 j = 0; j < seen.CountItems(); j++) {
+				if (*seen.ItemAt(j) == repo) {
+					found = true;
+					break;
+				}
+			}
+			if (!found) {
+				seen.AddItem(new BString(repo));
+				BMenuItem* item = new BMenuItem(repo.String(),
+					new BMessage(kMsgFilterChanged));
+				fFilterMenu->AddItem(item);
+				item->SetTarget(this);
+				if (repo == previousSelection)
+					item->SetMarked(true);
+			}
+		}
+
+		if (fFilterMenu->FindMarked() == NULL)
+			allItem->SetMarked(true);
+	}
+
+	// Rebuilds fListView's visible contents from fAllPackages according to
+	// the current filter + sort selection. Never deletes a PackageItem --
+	// fAllPackages owns all of them regardless of which ones are visible.
+	void _RebuildVisibleList()
+	{
+		BMenuItem* marked = fFilterMenu->FindMarked();
+		BString filterRepo = marked != NULL ? marked->Label() : "";
+		bool showAll = marked == NULL || filterRepo == T(kFilterAllRepos);
+
+		if (fSortMode == kSortByRepoName)
+			fAllPackages.SortItems(_CompareByRepo);
+		else
+			fAllPackages.SortItems(_CompareByPackage);
+
+		for (int32 i = fListView->CountItems() - 1; i >= 0; i--)
+			fListView->RemoveItem(i);
+
+		int32 shown = 0;
+		for (int32 i = 0; i < fAllPackages.CountItems(); i++) {
+			PackageItem* item = fAllPackages.ItemAt(i);
+			if (showAll || item->Repo() == filterRepo) {
+				fListView->AddItem(item);
+				shown++;
+			}
+		}
+		fStatus->SetText(TFInt(kPackagesCount, shown).String());
+	}
+
+	static int _CompareByPackage(const PackageItem* a, const PackageItem* b)
+	{
+		return a->PackageName().ICompare(b->PackageName());
+	}
+
+	static int _CompareByRepo(const PackageItem* a, const PackageItem* b)
+	{
+		int cmp = a->Repo().ICompare(b->Repo());
+		return cmp != 0 ? cmp : a->PackageName().ICompare(b->PackageName());
 	}
 
 	void _StartInstallJob(bool install)
@@ -454,9 +653,17 @@ private:
 	}
 
 	BListView* fListView;
+	ColumnHeaderView* fHeader;
+	BPopUpMenu* fFilterMenu;
+	BMenuField* fFilterField;
+	BPopUpMenu* fSortMenu;
+	BMenuField* fSortField;
 	BStringView* fStatus;
 	BButton* fRefreshButton;
 	BButton* fActionButton;
+
+	BObjectList<PackageItem, true> fAllPackages;
+	SortMode fSortMode;
 };
 
 class AppMarketApp : public BApplication {

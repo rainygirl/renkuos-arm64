@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-# Hand-rolled HVIF encoder for a simple BeOS/Haiku-style tilted box icon:
-# three flat-shaded parallelogram faces (top/left/right) forming an
-# isometric cube, the classic "generic application" icon motif.
+# Hand-rolled HVIF encoder for R AppMarket's icon: a basket (the "market"
+# part) with a generic app-icon tile sitting inside it, peeking out above
+# the rim.
 #
 # Byte format reverse-engineered directly from Haiku's own parser
 # (src/libs/icon/flat_icon/FlatIconImporter.cpp + FlatIconFormat.cpp) --
@@ -33,30 +33,23 @@ def shape_path_source(style_index, path_indices):
     out += bytes([0])  # shape flags: none
     return out
 
-# Isometric box, canvas ~0-64. Front vertical edge shared by left/right
-# faces runs from (32,40) to (32,58); apex at (32,8).
-P_TOP   = (32, 8)
-P_LEFT  = (8, 24)
-P_RIGHT = (56, 24)
-P_FRONT_TOP = (32, 40)
-P_FRONT_BOT = (32, 58)
-P_LEFT_BOT  = (8, 42)
-P_RIGHT_BOT = (56, 42)
-
-top_face   = [P_TOP, P_RIGHT, P_FRONT_TOP, P_LEFT]
-left_face  = [P_LEFT, P_FRONT_TOP, P_FRONT_BOT, P_LEFT_BOT]
-right_face = [P_RIGHT, P_RIGHT_BOT, P_FRONT_BOT, P_FRONT_TOP]
+# Canvas ~0-64. Drawn back-to-front: the "app" tile goes down first so the
+# basket's rim/body, painted after, cover its lower half -- only the top
+# peeks out above the rim, like an item sitting inside a basket.
+app_tile  = [(22, 8), (42, 8), (42, 30), (22, 30)]
+rim       = [(10, 26), (54, 26), (54, 36), (10, 36)]
+body      = [(14, 36), (50, 36), (44, 58), (20, 58)]
 
 styles = [
-    style_solid(0xD8, 0xE4, 0xF2),  # top: light blue-gray
-    style_solid(0x8F, 0xB0, 0xD9),  # left: medium blue
-    style_solid(0x4C, 0x6F, 0xA5),  # right: dark blue
+    style_solid(0x42, 0x85, 0xC3),  # app tile: bright blue
+    style_solid(0xA8, 0x7A, 0x4D),  # rim: medium brown
+    style_solid(0xD6, 0xAF, 0x82),  # body: light tan
 ]
 
 paths = [
-    path_closed_straight(top_face),
-    path_closed_straight(left_face),
-    path_closed_straight(right_face),
+    path_closed_straight(app_tile),
+    path_closed_straight(rim),
+    path_closed_straight(body),
 ]
 
 shapes = [

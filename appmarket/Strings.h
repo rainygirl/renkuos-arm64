@@ -24,6 +24,13 @@ enum StringKey {
 	kInstalledDone,   // "%s: installed."
 	kRemovedDone,     // "%s: removed."
 	kFailed,          // "%s: failed -- see Terminal/pkgman for details."
+	kColumnRepo,
+	kColumnPackage,
+	kFilterLabel,
+	kFilterAllRepos,
+	kSortLabel,
+	kSortByName,
+	kSortByRepo,
 	kStringCount
 };
 
@@ -43,6 +50,13 @@ static const char* kTable[kStringCount][6] = {
 	/* kInstalledDone  */ {"%s: installed.", "%s: 설치됨.", "%s: インストール完了。", "%s: installato.", "%s : installé.", "%s: instalado."},
 	/* kRemovedDone    */ {"%s: removed.", "%s: 제거됨.", "%s: 削除完了。", "%s: rimosso.", "%s : supprimé.", "%s: eliminado."},
 	/* kFailed         */ {"%s: failed -- see Terminal/pkgman for details.", "%s: 실패했습니다 -- 자세한 내용은 Terminal/pkgman을 확인하세요.", "%s: 失敗しました -- 詳細はTerminal/pkgmanを確認してください。", "%s: non riuscito -- vedi Terminal/pkgman per i dettagli.", "%s : échec -- voir Terminal/pkgman pour plus de détails.", "%s: fallo -- consulte Terminal/pkgman para más detalles."},
+	/* kColumnRepo     */ {"Repo", "저장소", "リポジトリ", "Repository", "Dépôt", "Repositorio"},
+	/* kColumnPackage  */ {"Package", "패키지", "パッケージ", "Pacchetto", "Paquet", "Paquete"},
+	/* kFilterLabel    */ {"Repo:", "저장소:", "リポジトリ:", "Repository:", "Dépôt :", "Repositorio:"},
+	/* kFilterAllRepos */ {"All repos", "모든 저장소", "すべてのリポジトリ", "Tutti i repository", "Tous les dépôts", "Todos los repositorios"},
+	/* kSortLabel      */ {"Sort:", "정렬:", "並べ替え:", "Ordina:", "Trier :", "Ordenar:"},
+	/* kSortByName     */ {"Package name", "패키지 이름", "パッケージ名", "Nome pacchetto", "Nom du paquet", "Nombre del paquete"},
+	/* kSortByRepo     */ {"Repo", "저장소", "リポジトリ", "Repository", "Dépôt", "Repositorio"},
 };
 
 static const char* kLanguageCodes[6] = {"en", "ko", "ja", "it", "fr", "es"};

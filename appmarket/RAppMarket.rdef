@@ -15,13 +15,13 @@ resource app_version {
 	long_info  = "R AppMarket -- browse and install RENKU arm64 packages"
 };
 
-// A hand-encoded BeOS/Haiku-style tilted box (the classic generic-app
-// icon motif): three flat-shaded parallelogram faces forming an
-// isometric cube. Built by tools/gen-rappmarket-icon.py directly against
-// Haiku's own HVIF parser (src/libs/icon/flat_icon/FlatIconImporter.cpp)
-// rather than from a spec, since Haiku ships no bitmap/SVG-to-HVIF tool.
+// A hand-encoded basket (the "market") with a generic app-icon tile
+// sitting inside it, peeking out above the rim. Built by
+// tools/gen-rappmarket-icon.py directly against Haiku's own HVIF parser
+// (src/libs/icon/flat_icon/FlatIconImporter.cpp) rather than from a spec,
+// since Haiku ships no bitmap/SVG-to-HVIF tool.
 resource vector_icon {
-	$"6E6369660301D8E4F2FF018FB0D9FF014C6FA5FF030A0440285838404828380A"
-	$"0428384048405A284A0A045838584A405A4048030A000100000A010101000A02"
+	$"6E63696603014285C3FF01A87A4DFF01D6AF82FF030A0436284A284A3E363E0A"
+	$"042A3A563A56442A440A042E4452444C5A345A030A000100000A010101000A02"
 	$"010200"
 };
