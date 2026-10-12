@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-# Hand-rolled HVIF encoder for R AppMarket's icon: a basket (the "market"
-# part) with a generic app-icon tile sitting inside it, peeking out above
-# the rim.
+# Hand-rolled HVIF encoder for R AppMarket's icon: a BeOS-style diamond
+# (rhombus) basket -- the classic isometric-viewed-from-above container
+# shape -- with a generic app tile nested inside it.
 #
 # Byte format reverse-engineered directly from Haiku's own parser
 # (src/libs/icon/flat_icon/FlatIconImporter.cpp + FlatIconFormat.cpp) --
@@ -33,23 +33,26 @@ def shape_path_source(style_index, path_indices):
     out += bytes([0])  # shape flags: none
     return out
 
-# Canvas ~0-64. Drawn back-to-front: the "app" tile goes down first so the
-# basket's rim/body, painted after, cover its lower half -- only the top
-# peeks out above the rim, like an item sitting inside a basket.
-app_tile  = [(22, 8), (42, 8), (42, 30), (22, 30)]
-rim       = [(10, 26), (54, 26), (54, 36), (10, 36)]
-body      = [(14, 36), (50, 36), (44, 58), (20, 58)]
+def diamond(cx, cy, r):
+    return [(cx, cy - r), (cx + r, cy), (cx, cy + r), (cx - r, cy)]
+
+# Canvas ~0-64, centered at (32, 32). Three concentric diamonds: the
+# basket's outer rim, its darker inner well, and a bright app tile
+# nested inside that well -- drawn back to front in that order.
+outer_rim = diamond(32, 32, 26)
+inner_well = diamond(32, 32, 16)
+app_tile = diamond(32, 32, 9)
 
 styles = [
+    style_solid(0xB2, 0x80, 0x53),  # outer rim: medium brown (basket wicker)
+    style_solid(0x6E, 0x4B, 0x2D),  # inner well: dark brown (basket interior)
     style_solid(0x42, 0x85, 0xC3),  # app tile: bright blue
-    style_solid(0xA8, 0x7A, 0x4D),  # rim: medium brown
-    style_solid(0xD6, 0xAF, 0x82),  # body: light tan
 ]
 
 paths = [
+    path_closed_straight(outer_rim),
+    path_closed_straight(inner_well),
     path_closed_straight(app_tile),
-    path_closed_straight(rim),
-    path_closed_straight(body),
 ]
 
 shapes = [
