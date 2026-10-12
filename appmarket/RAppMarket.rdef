@@ -15,14 +15,17 @@ resource app_version {
 	long_info  = "R AppMarket -- browse and install RENKU arm64 packages"
 };
 
-// A hand-encoded BeOS-style diamond (rhombus) basket -- the classic
-// isometric-viewed-from-above container shape -- with a generic app tile
-// nested inside it. Built by tools/gen-rappmarket-icon.py directly
-// against Haiku's own HVIF parser
+// A hand-encoded isometric 3D basket -- top/left/right faces, the same
+// cube construction Haiku's own R Memo icon uses (decoded directly from
+// R Memo's BEOS:ICON to confirm the geometry) -- with a generic app tile
+// nested in its open top. An earlier version was a flat 2D diamond
+// outline with no visible depth; this one actually rises in 3D the way
+// BeOS-style container icons do. Built by tools/gen-rappmarket-icon.py
+// directly against Haiku's own HVIF parser
 // (src/libs/icon/flat_icon/FlatIconImporter.cpp) rather than from a spec,
 // since Haiku ships no bitmap/SVG-to-HVIF tool.
 resource vector_icon {
-	$"6E6369660301B28053FF016E4B2DFF014285C3FF030A0440265A40405A26400A"
-	$"0440305040405030400A044037494040493740030A000100000A010101000A02"
-	$"010200"
+	$"6E6369660401D6AF82FF01A87A4DFF016E4B2DFF014285C3FF040A0422354047"
+	$"405522430A045E355E43405540470A0440235E35404722350A04402E4C35403C"
+	$"3435040A010100000A020101000A000102000A03010300"
 };

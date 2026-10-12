@@ -428,33 +428,78 @@ ResolveHpkgFilename(const BString& repoUrl, const BString& name)
 	return best;
 }
 
-// `package list -p` prints one bare path per entry. The handful of R*
-// apps this repo actually ships install their main binary straight under
-// apps/ (matching the Deskbar "Applications" menu symlink jam's own
-// AddFilesToPackage convention creates), so a direct, one-level apps/*
-// entry is as reliable a guess at "the file with the package's real
-// icon" as this repo's metadata allows without hardcoding a path per
-// package. Plain CLI tools (curl, htop, gzip, ...) have no such entry at
-// all and simply get no icon -- correct, not a bug, since Haiku's own
+// `package list -p` prints one bare path per entry, with no marker for
+// which ones are directories -- some packages install their main binary
+// straight under apps/ (apps/RPainter), others put it inside its own
+// folder alongside bundled shared libs (apps/R SDR/R SDR, next to
+// apps/R SDR/lib/*.so), and the folder and binary names don't always
+// even match (apps/RChromium/R Chromium). So: collect every apps/...
+// entry, drop whichever ones turn out to be directories (something else
+// listed starts with "<path>/"), drop anything sitting inside a
+// lib/fonts/locales subfolder or whose own filename has an extension
+// (shared libs and data files, not a bare Haiku executable), and take
+// whichever surviving candidate is shallowest -- the main binary is
+// never buried deeper than one folder in anything this repo ships.
+// Plain CLI tools (curl, htop, gzip, ...) have no apps/ entry at all and
+// simply get no icon -- correct, not a bug, since Haiku's own
 // generic-executable icon is what they would show for them too.
 static BString
 FindMainBinaryPath(const BString& listOutput)
 {
+	BObjectList<BString, true> appsPaths(16);
 	const char* p = listOutput.String();
 	while (*p != '\0') {
 		const char* nl = strchr(p, '\n');
 		size_t len = nl != NULL ? (size_t)(nl - p) : strlen(p);
 		BString line(p, (int32)len);
 		line.Trim();
-		if (line.FindFirst("apps/") == 0 && line.Length() > 5
-				&& line.FindFirst('/', 5) < 0) {
-			return line;
-		}
+		if (line.FindFirst("apps/") == 0 && line.Length() > 5)
+			appsPaths.AddItem(new BString(line));
 		if (nl == NULL)
 			break;
 		p = nl + 1;
 	}
-	return BString();
+
+	BString best;
+	int32 bestDepth = 1000;
+	for (int32 i = 0; i < appsPaths.CountItems(); i++) {
+		const BString& path = *appsPaths.ItemAt(i);
+
+		bool isDirectory = false;
+		BString childPrefix(path);
+		childPrefix << "/";
+		for (int32 j = 0; j < appsPaths.CountItems(); j++) {
+			if (i != j && appsPaths.ItemAt(j)->FindFirst(childPrefix) == 0) {
+				isDirectory = true;
+				break;
+			}
+		}
+		if (isDirectory)
+			continue;
+
+		if (path.IFindFirst("/lib/") >= 0 || path.IFindFirst("/fonts/") >= 0
+				|| path.IFindFirst("/locales/") >= 0)
+			continue;
+
+		BString leaf(path);
+		int32 lastSlash = leaf.FindLast('/');
+		if (lastSlash >= 0)
+			leaf.Remove(0, lastSlash + 1);
+		if (leaf.FindFirst('.') >= 0)
+			continue;
+
+		int32 depth = 0;
+		for (int32 k = 0; k < path.Length(); k++) {
+			if (path[k] == '/')
+				depth++;
+		}
+		if (depth < bestDepth) {
+			bestDepth = depth;
+			best = path;
+		}
+	}
+
+	return best;
 }
 
 struct IconJob {
