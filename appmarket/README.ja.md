@@ -2,7 +2,7 @@
 
 [English](README.md) · [한국어](README.ko.md) · **日本語** · [Italiano](README.it.md) · [Français](README.fr.md) · [Español](README.es.md)
 
-R AppMarketを使うと、Terminalで`pkgman`コマンドを打たなくても、ウィンドウ一つで登録された各リポジトリのすべてのアプリ(RENKUのR*アプリも含む)を探してインストールできます。
+R AppMarketを使うと、Terminalで`pkgman`コマンドを打たなくても、ウィンドウ一つで登録された各リポジトリのすべてのアプリを探してインストールできます。
 
 ![R AppMarket](screenshot.png)
 

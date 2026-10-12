@@ -2,7 +2,7 @@
 
 [English](README.md) · **한국어** · [日本語](README.ja.md) · [Italiano](README.it.md) · [Français](README.fr.md) · [Español](README.es.md)
 
-R AppMarket은 Terminal에 `pkgman` 명령을 직접 치지 않고도, 창 하나로 등록된 각 저장소의 모든 앱(그중에는 RENKU의 R* 앱들도 있습니다)을 찾아보고 설치할 수 있게 해줍니다.
+R AppMarket은 Terminal에 `pkgman` 명령을 직접 치지 않고도, 창 하나로 등록된 각 저장소의 모든 앱을 찾아보고 설치할 수 있게 해줍니다.
 
 ![R AppMarket](screenshot.png)
 
