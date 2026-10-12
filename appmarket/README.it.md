@@ -11,15 +11,22 @@ R AppMarket ti permette di cercare e installare tutte le app di ogni repository 
 Disponibile per **arm64**, **x86_64** e **x86** a 32 bit (ibrido gcc2).
 
 1. Apri **Terminal**: fai clic sul menu con la piuma in alto a destra, poi **Applications > Terminal**.
-2. Aggiungi il repository della tua architettura (non sai qual è? te lo dice `ls /system/packages/haiku-*.hpkg`), poi installa:
+2. Aggiungi il repository della tua architettura, poi installa (non sai qual è? te lo dice `ls /system/packages/haiku-*.hpkg`):
+
+   Su **arm64** o **x86_64**:
 
    ```sh
-   pkgman add-repo https://pkgman.rainygirl.com/arm64      # arm64
-   pkgman add-repo https://pkgman.rainygirl.com/x86_64     # x86 a 64 bit
-   pkgman add-repo https://pkgman.rainygirl.com/x86_gcc2   # x86 a 32 bit (ibrido gcc2)
-
+   pkgman add-repo https://pkgman.rainygirl.com/arm64    # oppure .../x86_64
    pkgman refresh
    pkgman install rappmarket
+   ```
+
+   Su **x86** a 32 bit (ibrido gcc2), il pacchetto si chiama `rappmarket_x86`:
+
+   ```sh
+   pkgman add-repo https://pkgman.rainygirl.com/x86_gcc2
+   pkgman refresh
+   pkgman install rappmarket_x86
    ```
 
 3. Se il Terminal fa una domanda, digita **y** e premi **Invio**.

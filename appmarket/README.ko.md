@@ -11,15 +11,22 @@ R AppMarket은 Terminal에 `pkgman` 명령을 직접 치지 않고도, 창 하�
 **arm64**, **x86_64**, 32비트 **x86**(gcc2 하이브리드)에서 설치할 수 있습니다.
 
 1. **Terminal** 열기: 화면 오른쪽 위 깃털 메뉴를 클릭한 다음 **Applications > Terminal**.
-2. 내 아키텍처에 맞는 저장소를 추가하세요 (헷갈리면 `ls /system/packages/haiku-*.hpkg`로 확인), 그다음 설치합니다.
+2. 내 아키텍처에 맞는 저장소를 추가한 다음 설치하세요 (헷갈리면 `ls /system/packages/haiku-*.hpkg`로 확인):
+
+   **arm64** 또는 **x86_64**:
 
    ```sh
-   pkgman add-repo https://pkgman.rainygirl.com/arm64      # arm64
-   pkgman add-repo https://pkgman.rainygirl.com/x86_64     # 64비트 x86
-   pkgman add-repo https://pkgman.rainygirl.com/x86_gcc2   # 32비트 x86 (gcc2 하이브리드)
-
+   pkgman add-repo https://pkgman.rainygirl.com/arm64    # 또는 .../x86_64
    pkgman refresh
    pkgman install rappmarket
+   ```
+
+   32비트 **x86**(gcc2 하이브리드)에서는 패키지 이름이 `rappmarket_x86`입니다:
+
+   ```sh
+   pkgman add-repo https://pkgman.rainygirl.com/x86_gcc2
+   pkgman refresh
+   pkgman install rappmarket_x86
    ```
 
 3. Terminal이 뭔가 물어보면 **y**를 입력하고 **Enter**를 누르세요.

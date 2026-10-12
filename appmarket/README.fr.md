@@ -11,15 +11,22 @@ R AppMarket vous permet de parcourir et d'installer toutes les applications de c
 Disponible pour **arm64**, **x86_64** et **x86** 32 bits (hybride gcc2).
 
 1. Ouvrez **Terminal** : cliquez sur le menu de la plume en haut à droite de l'écran, puis **Applications > Terminal**.
-2. Ajoutez le dépôt correspondant à votre architecture (vous ne savez pas laquelle ? `ls /system/packages/haiku-*.hpkg` vous le dit), puis installez :
+2. Ajoutez le dépôt correspondant à votre architecture, puis installez (vous ne savez pas laquelle ? `ls /system/packages/haiku-*.hpkg` vous le dit) :
+
+   Sur **arm64** ou **x86_64** :
 
    ```sh
-   pkgman add-repo https://pkgman.rainygirl.com/arm64      # arm64
-   pkgman add-repo https://pkgman.rainygirl.com/x86_64     # x86 64 bits
-   pkgman add-repo https://pkgman.rainygirl.com/x86_gcc2   # x86 32 bits (hybride gcc2)
-
+   pkgman add-repo https://pkgman.rainygirl.com/arm64    # ou .../x86_64
    pkgman refresh
    pkgman install rappmarket
+   ```
+
+   Sur **x86** 32 bits (hybride gcc2), le paquet s'appelle `rappmarket_x86` :
+
+   ```sh
+   pkgman add-repo https://pkgman.rainygirl.com/x86_gcc2
+   pkgman refresh
+   pkgman install rappmarket_x86
    ```
 
 3. Si Terminal pose une question, tapez **y** puis appuyez sur **Entrée**.
