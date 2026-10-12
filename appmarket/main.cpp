@@ -17,6 +17,7 @@
 #include <MenuField.h>
 #include <MenuItem.h>
 #include <Message.h>
+#include <MessageRunner.h>
 #include <Messenger.h>
 #include <Node.h>
 #include <NodeInfo.h>
@@ -111,6 +112,16 @@ static const uint32 kMsgFilterChanged = 'RFlt';
 static const uint32 kMsgSortChanged = 'RSrt';
 static const uint32 kMsgInfoDone = 'RInf';
 static const uint32 kMsgIconDone = 'RIcn';
+static const uint32 kMsgIconFetchTimer = 'RIcT';
+
+// How long a selection has to sit still before its icon is actually
+// fetched. Without this, scrolling through the list with the keyboard or
+// mouse wheel fires a selection-changed message -- and so a brand new
+// full .hpkg download -- for every row passed over, piling up a dozen
+// concurrent downloads that starve whichever one the user actually
+// stopped on (confirmed: the pile-up alone was enough to make the
+// genuinely-selected package's own fetch silently fail).
+static const bigtime_t kIconFetchDelay = 400000; // 400ms
 
 // Above this, _FetchIcon skips downloading the .hpkg at all -- the point
 // is a quick icon preview, not a way to pre-fetch large packages. Checked
@@ -707,6 +718,7 @@ public:
 		:
 		BWindow(BRect(100, 100, 900, 760), T(kWindowTitle), B_TITLED_WINDOW,
 			B_ASYNCHRONOUS_CONTROLS),
+		fDetailsFetchRunner(NULL),
 		fAllPackages(20),
 		fSortMode(kSortByPackage)
 	{
@@ -799,17 +811,29 @@ public:
 				PackageItem* item
 					= (PackageItem*)fListView->ItemAt(fListView->CurrentSelection());
 				fActionButton->SetEnabled(item != NULL);
+				delete fDetailsFetchRunner;
+				fDetailsFetchRunner = NULL;
 				if (item != NULL) {
 					fActionButton->SetLabel(item->Installed() ? T(kUninstall) : T(kInstall));
-					_FetchDescription(item->PackageName());
-					_FetchIcon(item->PackageName(), item->RepoUrl());
+					fDescriptionView->SetText(T(kLoading));
+					fIconPreview->SetBitmap(NULL);
+					fPendingDetailsName = item->PackageName();
+					fPendingDetailsRepoUrl = item->RepoUrl();
+					fDetailsFetchRunner = new BMessageRunner(BMessenger(this),
+						new BMessage(kMsgIconFetchTimer), kIconFetchDelay, 1);
 				} else {
 					fDescriptionView->SetText("");
+					fPendingInfoRequest = "";
 					fPendingIconRequest = "";
 					fIconPreview->SetBitmap(NULL);
 				}
 				break;
 			}
+
+			case kMsgIconFetchTimer:
+				_FetchDescription(fPendingDetailsName);
+				_FetchIcon(fPendingDetailsName, fPendingDetailsRepoUrl);
+				break;
 
 			case kMsgAction:
 			{
@@ -900,8 +924,20 @@ private:
 		BMenuItem* marked = fFilterMenu->FindMarked();
 		BString previousSelection = marked != NULL ? marked->Label() : "";
 
-		for (int32 i = fFilterMenu->CountItems() - 1; i >= 0; i--)
-			delete fFilterMenu->RemoveItem(i);
+		// RemoveItems(..., true) rather than RemoveItem()+delete in a loop:
+		// BMenuField wraps fFilterMenu in its own internal menu bar, which
+		// tracks the currently-displayed item to draw the field's closed-
+		// state label. Deleting items by hand, one RemoveItem() at a time,
+		// left that tracking holding a dangling pointer once the marked
+		// item was gone, corrupting the heap in a way that only actually
+		// crashed later and elsewhere (confirmed via a live crash: Haiku's
+		// own debug_server caught a "bogus pointer (double free?)" inside
+		// BList::_ResizeArray during a completely unrelated BListView
+		// redraw). RemoveItems() is BMenu's own blessed bulk-removal path
+		// and updates whatever BMenuField/the internal menu bar needs
+		// updated as part of the same call, instead of leaving that for us
+		// to get wrong by hand.
+		fFilterMenu->RemoveItems(0, fFilterMenu->CountItems(), true);
 
 		BMenuItem* allItem = new BMenuItem(T(kFilterAllRepos),
 			new BMessage(kMsgFilterChanged));
@@ -1115,6 +1151,13 @@ private:
 	BButton* fActionButton;
 	BString fPendingInfoRequest;
 	BString fPendingIconRequest;
+
+	// Debounces the description/icon fetch (see kIconFetchDelay) so
+	// scrolling through the list doesn't spawn a fetch -- a real .hpkg
+	// download, for the icon -- per row passed over.
+	BMessageRunner* fDetailsFetchRunner;
+	BString fPendingDetailsName;
+	BString fPendingDetailsRepoUrl;
 
 	BObjectList<PackageItem, true> fAllPackages;
 	SortMode fSortMode;
