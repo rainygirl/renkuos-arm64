@@ -231,4 +231,5 @@ HaikuWebKit 자체를 패치하고 `haikuwebkit`/`haikuwebkit_devel` 패키지�
   지원합니다. Haiku에는 virtio-console이 아예 없어서(확인함, 추측
   아님) QEMU를 통한 직접 채널은 애초에 불가능합니다.
 - **R\* 앱**: 부팅 후 호스팅된 저장소(https://pkgman.rainygirl.com/arm64)에서
-  `pkgman`으로 설치합니다. ISO에 미리 들어있지는 않습니다.
+  `pkgman`으로 설치합니다. ISO에 미리 들어있지는 않지만, R AppMarket 자체는
+  예외입니다 (0020) -- 나머지 앱을 설치할 GUI가 처음 부팅부터 항상 있도록.

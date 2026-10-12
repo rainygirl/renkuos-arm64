@@ -1,0 +1,50 @@
+Subject: [PATCH] minimum arm64: ship R AppMarket on the image
+
+R AppMarket (browse and install every app in each pkgman repository it
+knows about, from a window) used to be something a fresh guest had to
+`pkgman install` by hand before it could use it to install anything
+else -- the one app a minimal image most needs already on it, since
+everything else in RENKU Apps is reached through it. Baked into the
+image the same way curl/gzip/tar/wget and openssh already are: the
+hpkg is in ../packages/, and add-media-arm64.sh copies it into the
+generated directory's download/.
+
+The copy in ../packages/ says vendor "Haiku Project", not "RENKU":
+this build's own local HaikuPorts-info repository (built from
+everything in download/) refuses a package whose vendor differs from
+the rest of it, same as 0012's curl/wget note already explains. It is
+rebuilt from the same recipe as the "RENKU" one published live on
+pkgman.rainygirl.com, just with REPO_VENDOR set to "Haiku Project" for
+this one copy -- same binary, different vendor metadata only.
+
+diff -ru a/build/jam/DefaultBuildProfiles b/build/jam/DefaultBuildProfiles
+--- a/build/jam/DefaultBuildProfiles	2026-10-09 13:01:32.000000000 +0000
++++ b/build/jam/DefaultBuildProfiles	2026-10-12 19:55:29.000000000 +0000
+@@ -240,6 +240,15 @@
+ 					openssh
+ 					;
+ 			}
++
++			# R AppMarket: so pkgman install's own GUI is on the image from
++			# first boot instead of needing itself installed by hand first.
++			# Published in RENKU Apps, like curl/gzip/tar/wget above.
++			if $(TARGET_PACKAGING_ARCH) = arm64 {
++				AddHaikuImageSystemPackages
++					rappmarket
++					;
++			}
+ 		}
+
+ 		case "test-*" : {
+diff -ru a/build/jam/repositories/HaikuPorts/arm64 b/build/jam/repositories/HaikuPorts/arm64
+--- a/build/jam/repositories/HaikuPorts/arm64	2026-10-09 13:01:32.000000000 +0000
++++ b/build/jam/repositories/HaikuPorts/arm64	2026-10-12 19:55:42.000000000 +0000
+@@ -72,6 +72,8 @@
+ 	sqlite3-3.50.4-1
+ 	webpositive-r1~beta6_hrev99000_dirty-1
+ 	openssh-10.4p1-1
++	# R AppMarket -- published in RENKU Apps, same as curl/gzip/tar/wget above.
++	rappmarket-1.0.0-4
+ 	:
+ 	# source packages
+ 	bash

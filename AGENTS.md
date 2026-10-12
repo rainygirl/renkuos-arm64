@@ -193,4 +193,6 @@ reinvestigating here.)
   virtio-console exists in Haiku to do this through QEMU directly instead
   (checked, not assumed).
 - **R\* apps**: install via `pkgman` from the hosted repository,
-  https://pkgman.rainygirl.com/arm64, after boot -- not baked into the ISO.
+  https://pkgman.rainygirl.com/arm64, after boot -- not baked into the ISO,
+  with one exception: R AppMarket itself ships on the image (0020), so a
+  fresh guest always has a GUI to install the rest with.
