@@ -32,6 +32,14 @@ enum StringKey {
 	kSortByName,
 	kSortByRepo,
 	kNoDescription,
+	kMenuRepos,            // "Repos" menu title
+	kMenuAddRepo,          // "Add Repo..." menu item
+	kMenuRemoveRepo,       // "Remove Repo" submenu title
+	kMenuRemoveRepoEmpty,  // disabled placeholder when there are no custom repos
+	kAddRepoWindowTitle,
+	kAddRepoURLLabel,
+	kAddRepoButton,
+	kCancelButton,
 	kStringCount
 };
 
@@ -59,6 +67,14 @@ static const char* kTable[kStringCount][6] = {
 	/* kSortByName     */ {"Package name", "패키지 이름", "パッケージ名", "Nome pacchetto", "Nom du paquet", "Nombre del paquete"},
 	/* kSortByRepo     */ {"Repo", "저장소", "リポジトリ", "Repository", "Dépôt", "Repositorio"},
 	/* kNoDescription  */ {"No description available.", "설명이 없습니다.", "説明はありません。", "Nessuna descrizione disponibile.", "Aucune description disponible.", "No hay descripción disponible."},
+	/* kMenuRepos           */ {"Repos", "저장소", "リポジトリ", "Repository", "Dépôts", "Repositorios"},
+	/* kMenuAddRepo         */ {"Add Repo...", "저장소 추가...", "リポジトリを追加...", "Aggiungi repository...", "Ajouter un dépôt...", "Añadir repositorio..."},
+	/* kMenuRemoveRepo      */ {"Remove Repo", "저장소 삭제", "リポジトリを削除", "Rimuovi repository", "Supprimer un dépôt", "Eliminar repositorio"},
+	/* kMenuRemoveRepoEmpty */ {"No custom repos", "추가한 저장소 없음", "追加したリポジトリなし", "Nessun repository personalizzato", "Aucun dépôt personnalisé", "Sin repositorios personalizados"},
+	/* kAddRepoWindowTitle  */ {"Add Repository", "저장소 추가", "リポジトリの追加", "Aggiungi repository", "Ajouter un dépôt", "Añadir repositorio"},
+	/* kAddRepoURLLabel     */ {"Repository URL:", "저장소 URL:", "リポジトリURL:", "URL del repository:", "URL du dépôt :", "URL del repositorio:"},
+	/* kAddRepoButton       */ {"Add", "추가", "追加", "Aggiungi", "Ajouter", "Añadir"},
+	/* kCancelButton        */ {"Cancel", "취소", "キャンセル", "Annulla", "Annuler", "Cancelar"},
 };
 
 static const char* kLanguageCodes[6] = {"en", "ko", "ja", "it", "fr", "es"};

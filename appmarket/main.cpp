@@ -11,9 +11,12 @@
 #include <Button.h>
 #include <Directory.h>
 #include <Entry.h>
+#include <File.h>
+#include <FindDirectory.h>
 #include <LayoutBuilder.h>
 #include <ListItem.h>
 #include <ListView.h>
+#include <MenuBar.h>
 #include <MenuField.h>
 #include <MenuItem.h>
 #include <Message.h>
@@ -26,6 +29,7 @@
 #include <ScrollView.h>
 #include <String.h>
 #include <StringView.h>
+#include <TextControl.h>
 #include <TextView.h>
 #include <View.h>
 #include <Window.h>
@@ -67,6 +71,22 @@ static const RepoDef kRepos[] = {
 	{ "http://fatelk.com/repo_64", "x86_64" },
 };
 static const int32 kRepoCount = sizeof(kRepos) / sizeof(kRepos[0]);
+
+// Whether `url` is one of the compiled-in repos above -- used to keep a
+// user from "adding" a repo that's already built in (a harmless no-op,
+// but silently doing nothing is less confusing than silently adding a
+// duplicate), and to keep the Remove Repo menu limited to repos the user
+// actually added themselves (see _RebuildRemoveRepoMenu): a built-in
+// repo was never meant to be removable at runtime.
+static bool
+IsBuiltinRepoURL(const BString& url)
+{
+	for (int32 i = 0; i < kRepoCount; i++) {
+		if (url.ICompare(kRepos[i].url) == 0)
+			return true;
+	}
+	return false;
+}
 
 // Just the host part of a repo URL ("pkgman.rainygirl.com" out of
 // "https://pkgman.rainygirl.com/arm64") -- what gets shown as the Repo
@@ -110,6 +130,9 @@ static const uint32 kMsgSelectionChanged = 'RSel';
 static const uint32 kMsgFilterChanged = 'RFlt';
 static const uint32 kMsgSortChanged = 'RSrt';
 static const uint32 kMsgIconDone = 'RIcn';
+static const uint32 kMsgShowAddRepo = 'RAdS';
+static const uint32 kMsgAddRepo = 'RAdd';
+static const uint32 kMsgRemoveRepo = 'RRmv';
 
 // Above this, the icon prefetch skips downloading a package's .hpkg at
 // all -- the point is a quick icon, not a way to pre-fetch large
@@ -496,8 +519,66 @@ struct InstallJob {
 	bool install; // true = install, false = uninstall
 };
 
+// Repos the user has added beyond the built-in kRepos table (see
+// AddRepoWindow/kMsgAddRepo) are persisted here as a flattened BMessage
+// of "url" strings, one per custom repo -- kRepos itself is a compiled-in
+// const array and was never meant to be edited at runtime, so user
+// additions live entirely in this separate file instead. There is
+// deliberately no equivalent "removed" list: a built-in repo can't be
+// removed at all (see _RebuildRemoveRepoMenu), only custom ones can.
+static BString
+CustomReposSettingsPath()
+{
+	BPath path;
+	if (find_directory(B_USER_SETTINGS_DIRECTORY, &path) != B_OK)
+		return BString();
+	path.Append("RAppMarket_repos");
+	return BString(path.Path());
+}
+
+static void
+LoadCustomRepos(BObjectList<BString, true>* repos)
+{
+	BString path = CustomReposSettingsPath();
+	if (path.Length() == 0)
+		return;
+
+	BFile file(path.String(), B_READ_ONLY);
+	if (file.InitCheck() != B_OK)
+		return;
+
+	BMessage stored;
+	if (stored.Unflatten(&file) != B_OK)
+		return;
+
+	BString url;
+	for (int32 i = 0; stored.FindString("url", i, &url) == B_OK; i++)
+		repos->AddItem(new BString(url));
+}
+
+static void
+SaveCustomRepos(const BObjectList<BString, true>& repos)
+{
+	BString path = CustomReposSettingsPath();
+	if (path.Length() == 0)
+		return;
+
+	BMessage stored;
+	for (int32 i = 0; i < repos.CountItems(); i++)
+		stored.AddString("url", *repos.ItemAt(i));
+
+	BFile file(path.String(), B_WRITE_ONLY | B_CREATE_FILE | B_ERASE_FILE);
+	if (file.InitCheck() == B_OK)
+		stored.Flatten(&file);
+}
+
 struct RefreshJob {
 	BMessenger target;
+	// Owned by the job; deleted by RefreshThreadFunc once it's done with
+	// it. Built by _Refresh() from kRepos (filtered to the current arch)
+	// plus whatever custom repos the user has added, so the thread itself
+	// never has to know about either source.
+	BObjectList<BString, true>* repoUrls;
 };
 
 // `pkgman info` reads straight out of the local repo index this app
@@ -835,28 +916,25 @@ static int32
 RefreshThreadFunc(void* data)
 {
 	RefreshJob* job = (RefreshJob*)data;
-	const char* arch = CurrentArch();
 
 	BMessage done(kMsgRefreshDone);
 	bool any = false;
-	for (int32 i = 0; i < kRepoCount; i++) {
-		const RepoDef& repo = kRepos[i];
-		if (strcmp(repo.arch, arch) != 0)
-			continue;
+	for (int32 i = 0; i < job->repoUrls->CountItems(); i++) {
+		const BString& url = *job->repoUrls->ItemAt(i);
 
-		if (!IsRepoKnown(repo.url)) {
+		if (!IsRepoKnown(url.String())) {
 			BString addCmd("pkgman add-repo '");
-			addCmd << repo.url << "' < /dev/null >/dev/null 2>&1";
+			addCmd << url << "' < /dev/null >/dev/null 2>&1";
 			RunCaptured(addCmd.String());
 		}
 
 		BString listCmd("curl -fsS '");
-		listCmd << repo.url << "/packages.txt' 2>/dev/null";
+		listCmd << url << "/packages.txt' 2>/dev/null";
 		BString listing = RunCaptured(listCmd.String());
 		if (listing.Length() > 0) {
 			any = true;
-			AppendUniqueLines(listing, HostFromURL(repo.url).String(),
-				repo.url, &done);
+			AppendUniqueLines(listing, HostFromURL(url.String()).String(),
+				url.String(), &done);
 		}
 	}
 
@@ -876,9 +954,73 @@ RefreshThreadFunc(void* data)
 	done.AddBool("success", any);
 	job->target.SendMessage(&done);
 
+	delete job->repoUrls;
 	delete job;
 	return 0;
 }
+
+static const uint32 kMsgAddRepoConfirm = 'RARC';
+
+// A small floating window for typing in a repo URL -- Haiku has no
+// built-in single-line-input alert, so this is the minimal custom
+// window that does the same job. Not modal: the main window stays
+// usable while this is open, and closing this one (Cancel, the window
+// close box, or Add) never affects it beyond the one kMsgAddRepo it
+// sends on success.
+class AddRepoWindow : public BWindow {
+public:
+	AddRepoWindow(BMessenger target)
+		:
+		BWindow(BRect(150, 150, 550, 230), T(kAddRepoWindowTitle),
+			B_TITLED_WINDOW,
+			B_NOT_RESIZABLE | B_NOT_ZOOMABLE | B_AUTO_UPDATE_SIZE_LIMITS),
+		fTarget(target)
+	{
+		fUrlControl = new BTextControl("url", T(kAddRepoURLLabel), "", NULL);
+
+		BButton* addButton = new BButton("add", T(kAddRepoButton),
+			new BMessage(kMsgAddRepoConfirm));
+		// Cancel's own invocation message is the system "please close"
+		// message directly -- BWindow already handles that by quitting,
+		// so there's no need for a dedicated handler just to call Quit().
+		BButton* cancelButton = new BButton("cancel", T(kCancelButton),
+			new BMessage(B_QUIT_REQUESTED));
+
+		BLayoutBuilder::Group<>(this, B_VERTICAL, 10)
+			.SetInsets(10)
+			.Add(fUrlControl)
+			.AddGroup(B_HORIZONTAL, 10)
+				.AddGlue()
+				.Add(cancelButton)
+				.Add(addButton)
+			.End();
+
+		addButton->MakeDefault(true);
+		fUrlControl->MakeFocus(true);
+	}
+
+	void MessageReceived(BMessage* message)
+	{
+		if (message->what == kMsgAddRepoConfirm) {
+			BString url(fUrlControl->Text());
+			url.Trim();
+			while (url.Length() > 0 && url[url.Length() - 1] == '/')
+				url.Remove(url.Length() - 1, 1);
+			if (url.Length() > 0) {
+				BMessage add(kMsgAddRepo);
+				add.AddString("url", url);
+				fTarget.SendMessage(&add);
+			}
+			PostMessage(B_QUIT_REQUESTED);
+			return;
+		}
+		BWindow::MessageReceived(message);
+	}
+
+private:
+	BMessenger fTarget;
+	BTextControl* fUrlControl;
+};
 
 class AppMarketWindow : public BWindow {
 public:
@@ -909,6 +1051,23 @@ public:
 		fSortField = new BMenuField("sort-by", T(kSortLabel), fSortMenu);
 		fFilterMenu->SetTargetForItems(this);
 		fSortMenu->SetTargetForItems(this);
+
+		fMenuBar = new BMenuBar("menubar");
+		BMenu* repoMenu = new BMenu(T(kMenuRepos));
+		BMenuItem* addRepoItem = new BMenuItem(T(kMenuAddRepo),
+			new BMessage(kMsgShowAddRepo));
+		repoMenu->AddItem(addRepoItem);
+		addRepoItem->SetTarget(this);
+		repoMenu->AddSeparatorItem();
+		// Populated by _RebuildRemoveRepoMenu from fCustomRepos only -- a
+		// built-in repo (kRepos) never appears here, so it can't be
+		// removed (see IsBuiltinRepoURL).
+		fRemoveRepoMenu = new BMenu(T(kMenuRemoveRepo));
+		repoMenu->AddItem(fRemoveRepoMenu);
+		fMenuBar->AddItem(repoMenu);
+
+		LoadCustomRepos(&fCustomRepos);
+		_RebuildRemoveRepoMenu();
 
 		fIconPreview = new IconPreviewView();
 
@@ -941,24 +1100,29 @@ public:
 		// not mixed with manual MoveTo/ResizeTo (which is what silently
 		// produced a correctly-populated but zero-size, invisible list the
 		// first time this was tried).
-		BLayoutBuilder::Group<>(this, B_VERTICAL, 10)
-			.SetInsets(10)
-			.AddGroup(B_HORIZONTAL, 10)
-				.Add(fFilterField)
-				.Add(fSortField)
-				.AddGlue()
-			.End()
-			.Add(fHeader)
-			.Add(scroll, 3)
-			.AddGroup(B_HORIZONTAL, 10, 1)
-				.Add(fIconPreview)
-				.Add(descScroll)
-			.End()
-			.AddGroup(B_HORIZONTAL, 10)
-				.Add(fStatus)
-				.AddGlue()
-				.Add(fRefreshButton)
-				.Add(fActionButton)
+		// The menu bar sits outside the 10px inset group -- it's meant to
+		// span the window edge to edge, like any other menu bar.
+		BLayoutBuilder::Group<>(this, B_VERTICAL, 0)
+			.Add(fMenuBar)
+			.AddGroup(B_VERTICAL, 10)
+				.SetInsets(10)
+				.AddGroup(B_HORIZONTAL, 10)
+					.Add(fFilterField)
+					.Add(fSortField)
+					.AddGlue()
+				.End()
+				.Add(fHeader)
+				.Add(scroll, 3)
+				.AddGroup(B_HORIZONTAL, 10, 1)
+					.Add(fIconPreview)
+					.Add(descScroll)
+				.End()
+				.AddGroup(B_HORIZONTAL, 10)
+					.Add(fStatus)
+					.AddGlue()
+					.Add(fRefreshButton)
+					.Add(fActionButton)
+				.End()
 			.End();
 
 		_Refresh();
@@ -1024,6 +1188,23 @@ public:
 				_RebuildVisibleList();
 				break;
 
+			case kMsgShowAddRepo:
+			{
+				AddRepoWindow* addWindow = new AddRepoWindow(BMessenger(this));
+				BRect mainFrame = Frame();
+				addWindow->MoveTo(mainFrame.left + 60, mainFrame.top + 80);
+				addWindow->Show();
+				break;
+			}
+
+			case kMsgAddRepo:
+				_HandleAddRepo(message);
+				break;
+
+			case kMsgRemoveRepo:
+				_HandleRemoveRepo(message);
+				break;
+
 			default:
 				BWindow::MessageReceived(message);
 		}
@@ -1035,14 +1216,94 @@ private:
 		fStatus->SetText(T(kFetchingList));
 		fRefreshButton->SetEnabled(false);
 
+		BObjectList<BString, true>* urls = new BObjectList<BString, true>(8);
+		const char* arch = CurrentArch();
+		for (int32 i = 0; i < kRepoCount; i++) {
+			if (strcmp(kRepos[i].arch, arch) == 0)
+				urls->AddItem(new BString(kRepos[i].url));
+		}
+		for (int32 i = 0; i < fCustomRepos.CountItems(); i++)
+			urls->AddItem(new BString(*fCustomRepos.ItemAt(i)));
+
 		RefreshJob* job = new RefreshJob;
 		job->target = BMessenger(this);
+		job->repoUrls = urls;
 		thread_id t = spawn_thread(RefreshThreadFunc, "appmarket-refresh",
 			B_NORMAL_PRIORITY, job);
-		if (t >= 0)
+		if (t >= 0) {
 			resume_thread(t);
-		else
+		} else {
+			delete urls;
 			delete job;
+		}
+	}
+
+	// Adding a repo that's already covered -- either a built-in one or
+	// one already in fCustomRepos -- is a silent no-op rather than a
+	// duplicate entry or an error dialog: harmless either way, and not
+	// worth a confirmation the user didn't ask for.
+	void _HandleAddRepo(BMessage* message)
+	{
+		BString url;
+		if (message->FindString("url", &url) != B_OK || url.Length() == 0)
+			return;
+
+		if (IsBuiltinRepoURL(url))
+			return;
+		for (int32 i = 0; i < fCustomRepos.CountItems(); i++) {
+			if (fCustomRepos.ItemAt(i)->ICompare(url) == 0)
+				return;
+		}
+
+		fCustomRepos.AddItem(new BString(url));
+		SaveCustomRepos(fCustomRepos);
+		_RebuildRemoveRepoMenu();
+		_Refresh();
+	}
+
+	void _HandleRemoveRepo(BMessage* message)
+	{
+		BString url;
+		if (message->FindString("url", &url) != B_OK)
+			return;
+
+		for (int32 i = 0; i < fCustomRepos.CountItems(); i++) {
+			if (*fCustomRepos.ItemAt(i) == url) {
+				// RemoveItemAt detaches without deleting regardless of the
+				// list's own Owning flag -- unlike RemoveItems(..., true)
+				// used elsewhere in this file, it always leaves freeing
+				// the item to the caller.
+				delete fCustomRepos.RemoveItemAt(i);
+				break;
+			}
+		}
+		SaveCustomRepos(fCustomRepos);
+		_RebuildRemoveRepoMenu();
+		_Refresh();
+	}
+
+	// Lists only fCustomRepos -- a built-in repo (kRepos) never appears
+	// here at all, so there's no way to remove one from this menu, by
+	// design (see IsBuiltinRepoURL).
+	void _RebuildRemoveRepoMenu()
+	{
+		fRemoveRepoMenu->RemoveItems(0, fRemoveRepoMenu->CountItems(), true);
+
+		if (fCustomRepos.CountItems() == 0) {
+			BMenuItem* placeholder = new BMenuItem(T(kMenuRemoveRepoEmpty), NULL);
+			placeholder->SetEnabled(false);
+			fRemoveRepoMenu->AddItem(placeholder);
+			return;
+		}
+
+		for (int32 i = 0; i < fCustomRepos.CountItems(); i++) {
+			const BString& url = *fCustomRepos.ItemAt(i);
+			BMessage* msg = new BMessage(kMsgRemoveRepo);
+			msg->AddString("url", url);
+			BMenuItem* item = new BMenuItem(url.String(), msg);
+			fRemoveRepoMenu->AddItem(item);
+			item->SetTarget(this);
+		}
 	}
 
 	void _HandleRefreshDone(BMessage* message)
@@ -1312,6 +1573,8 @@ private:
 	BMenuField* fFilterField;
 	BPopUpMenu* fSortMenu;
 	BMenuField* fSortField;
+	BMenuBar* fMenuBar;
+	BMenu* fRemoveRepoMenu;
 	IconPreviewView* fIconPreview;
 	BTextView* fDescriptionView;
 	BStringView* fStatus;
@@ -1320,6 +1583,10 @@ private:
 
 	BObjectList<PackageItem, true> fAllPackages;
 	SortMode fSortMode;
+
+	// Repos the user has added at runtime (see AddRepoWindow), persisted
+	// via SaveCustomRepos/LoadCustomRepos -- kRepos itself never changes.
+	BObjectList<BString, true> fCustomRepos;
 
 	// Background icon prefetch (see _QueueIconFetches/_PumpIconQueue).
 	// fIconQueue holds borrowed pointers only -- fAllPackages above is
