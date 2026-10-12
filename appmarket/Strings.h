@@ -42,6 +42,9 @@ enum StringKey {
 	kAddRepoURLLabel,
 	kAddRepoButton,
 	kCancelButton,
+	kAddDesktopIconQuestion, // "Add \"%s\" to the Desktop?" -- asked after a successful install
+	kNoButton,
+	kAddToDesktopButton,
 	kStringCount
 };
 
@@ -79,6 +82,9 @@ static const char* kTable[kStringCount][6] = {
 	/* kAddRepoURLLabel     */ {"Repository URL:", "저장소 URL:", "リポジトリURL:", "URL del repository:", "URL du dépôt :", "URL del repositorio:"},
 	/* kAddRepoButton       */ {"Add", "추가", "追加", "Aggiungi", "Ajouter", "Añadir"},
 	/* kCancelButton        */ {"Cancel", "취소", "キャンセル", "Annulla", "Annuler", "Cancelar"},
+	/* kAddDesktopIconQuestion */ {"Add \"%s\" to the Desktop?", "\"%s\"을(를) 데스크탑에 추가할까요?", "\"%s\" をデスクトップに追加しますか?", "Aggiungere \"%s\" alla Scrivania?", "Ajouter \"%s\" au Bureau ?", "¿Añadir \"%s\" al Escritorio?"},
+	/* kNoButton            */ {"No", "아니요", "いいえ", "No", "Non", "No"},
+	/* kAddToDesktopButton  */ {"Add to Desktop", "데스크탑에 추가", "デスクトップに追加", "Aggiungi alla Scrivania", "Ajouter au Bureau", "Añadir al Escritorio"},
 };
 
 static const char* kLanguageCodes[6] = {"en", "ko", "ja", "it", "fr", "es"};

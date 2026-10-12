@@ -6,6 +6,7 @@
 // already-trusted `pkgman` and `curl` for everything that touches the
 // network or the package database, the same tools a user would run by
 // hand in Terminal.
+#include <Alert.h>
 #include <Application.h>
 #include <Bitmap.h>
 #include <Button.h>
@@ -36,6 +37,7 @@
 
 #include <OS.h>
 
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -133,6 +135,7 @@ static const uint32 kMsgIconDone = 'RIcn';
 static const uint32 kMsgShowAddRepo = 'RAdS';
 static const uint32 kMsgAddRepo = 'RAdd';
 static const uint32 kMsgRemoveRepo = 'RRmv';
+static const uint32 kMsgInstallLog = 'RInL';
 
 // Above this, the icon prefetch skips downloading a package's .hpkg at
 // all -- the point is a quick icon, not a way to pre-fetch large
@@ -790,6 +793,194 @@ IconThreadFunc(void* data)
 	return 0;
 }
 
+// pkgman's own download/checksum progress ("foo.hpkg [ KiB]") redraws one
+// line with '\r' and is empty of any real number once it's not writing to
+// an actual terminal (confirmed by capturing a real pkgman install over a
+// plain pipe: the brackets stay blank) -- so there is no byte-level
+// percentage to show for that step, from pkgman or from R InstallWizard
+// either (it shows the same step as an indeterminate "Installing..." --
+// see its Jobs.cpp). What IS real and worth showing live is pkgman's own
+// stage-by-step messages (checksum validation, "Applying changes",
+// "Cleaning up", "Done") -- this is exactly R InstallWizard's own
+// RunCommand/IsWorthLogging filtering (see its PackageTools.cpp): drop
+// \r-redrawn progress noise and ANSI escapes, keep only settled lines
+// that have an actual letter in them.
+static bool
+IsWorthLoggingLine(const BString& line)
+{
+	if (line.Length() == 0)
+		return false;
+	if (line[line.Length() - 1] == ']' && line.FindLast(" [") >= 0)
+		return false;
+	for (int32 i = 0; i < line.Length(); i++) {
+		if (isalpha((unsigned char)line[i]))
+			return true;
+	}
+	return false;
+}
+
+// Like RunCaptured, but sends each settled line (see IsWorthLoggingLine)
+// to `target` as a kMsgInstallLog as it arrives, instead of only
+// returning the full output once the command has already finished -- the
+// live log R AppMarket's own Install button shows, matching R
+// InstallWizard's install log instead of a single static status line
+// shown only after the fact.
+static BString
+RunCapturedStreaming(const char* command, const BMessenger& target)
+{
+	BString result;
+	FILE* pipe = popen(command, "r");
+	if (pipe == NULL)
+		return result;
+
+	BString line;
+	int c;
+	while ((c = fgetc(pipe)) != EOF) {
+		if (c == '\r') {
+			line = "";
+		} else if (c == '\n') {
+			result << line << "\n";
+			BString trimmed(line);
+			trimmed.Trim();
+			if (IsWorthLoggingLine(trimmed)) {
+				BMessage log(kMsgInstallLog);
+				log.AddString("text", trimmed);
+				target.SendMessage(&log);
+			}
+			line = "";
+		} else if (c == 0x1b) {
+			// ESC [ parameters final-byte -- dropped entirely.
+			int next = fgetc(pipe);
+			if (next == '[') {
+				while ((next = fgetc(pipe)) != EOF
+						&& !(next >= 0x40 && next <= 0x7e))
+					;
+			}
+		} else if (c >= 0x20 || c == '\t') {
+			line << (char)c;
+		}
+	}
+	if (line.Length() > 0) {
+		result << line;
+		BString trimmed(line);
+		trimmed.Trim();
+		if (IsWorthLoggingLine(trimmed)) {
+			BMessage log(kMsgInstallLog);
+			log.AddString("text", trimmed);
+			target.SendMessage(&log);
+		}
+	}
+	pclose(pipe);
+	return result;
+}
+
+// After a successful install (never offered on uninstall), resolves the
+// package's own Desktop-worthy target and asks -- synchronously, from
+// this background job thread, the same way R InstallWizard asks its own
+// post-install question from its own job thread rather than the window's
+// -- whether to add it to the Desktop. Mirrors R InstallWizard's
+// post-install step (see its AGENTS.md/PackageTools.cpp LaunchTargets),
+// minus the system/home choice (R AppMarket only ever installs
+// system-wide) and the multi-entry list (every R* package here is a
+// single app, not a bundle).
+static void
+OfferDesktopIcon(const BString& name)
+{
+	BDirectory dir(kPackagesDir);
+	if (dir.InitCheck() != B_OK)
+		return;
+
+	BString prefix(name);
+	prefix << "-";
+	BString hpkgName;
+	BEntry entry;
+	char entryName[B_FILE_NAME_LENGTH];
+	dir.Rewind();
+	while (dir.GetNextEntry(&entry) == B_OK) {
+		if (entry.GetName(entryName) != B_OK)
+			continue;
+		if (strncmp(entryName, prefix.String(), prefix.Length()) == 0) {
+			hpkgName = entryName;
+			break;
+		}
+	}
+	if (hpkgName.Length() == 0)
+		return;
+
+	BString hpkgPath(kPackagesDir);
+	hpkgPath << "/" << hpkgName;
+
+	BString listCmd("package list -p '");
+	listCmd << hpkgPath << "' 2>/dev/null";
+	BString listing = RunCaptured(listCmd.String());
+
+	BString displayName;
+	BString targetPath;
+
+	// A data/deskbar/menu/... entry is what the package itself chose to
+	// show -- always installed as a real symlink, so what it resolves to
+	// is read directly off disk rather than guessed from the listing.
+	const char* p = listing.String();
+	while (*p != '\0' && targetPath.Length() == 0) {
+		const char* nl = strchr(p, '\n');
+		size_t len = nl != NULL ? (size_t)(nl - p) : strlen(p);
+		BString line(p, (int32)len);
+		line.Trim();
+		if (line.FindFirst("data/deskbar/menu/") == 0) {
+			BString installedPath("/boot/system/");
+			installedPath << line;
+			BEntry linkEntry(installedPath.String());
+			if (linkEntry.IsSymLink()) {
+				BEntry resolved(installedPath.String(), true);
+				BPath resolvedPath;
+				if (resolved.Exists() && !resolved.IsDirectory()
+						&& resolved.GetPath(&resolvedPath) == B_OK) {
+					int32 lastSlash = line.FindLast('/');
+					displayName = lastSlash >= 0
+						? BString(line.String() + lastSlash + 1) : line;
+					targetPath = resolvedPath.Path();
+				}
+			}
+		}
+		if (nl == NULL)
+			break;
+		p = nl + 1;
+	}
+
+	// No Deskbar entry -- fall back to the package's own main apps/
+	// binary, the same resolution icon-fetching already uses (see
+	// FindMainBinaryPath).
+	if (targetPath.Length() == 0) {
+		BString binaryPath = FindMainBinaryPath(listing);
+		if (binaryPath.Length() > 0) {
+			targetPath = "/boot/system/";
+			targetPath << binaryPath;
+			int32 lastSlash = binaryPath.FindLast('/');
+			displayName = lastSlash >= 0
+				? BString(binaryPath.String() + lastSlash + 1) : binaryPath;
+		}
+	}
+
+	if (targetPath.Length() == 0)
+		return;
+
+	BString question = TF(kAddDesktopIconQuestion, displayName.String());
+	BAlert* alert = new BAlert(T(kWindowTitle), question.String(),
+		T(kNoButton), T(kAddToDesktopButton));
+	alert->SetShortcut(0, B_ESCAPE);
+	int32 choice = alert->Go();
+	if (choice != 1)
+		return;
+
+	BPath desktopPath;
+	if (find_directory(B_DESKTOP_DIRECTORY, &desktopPath) != B_OK)
+		return;
+	BDirectory desktop(desktopPath.Path());
+	if (desktop.InitCheck() != B_OK || desktop.Contains(displayName.String()))
+		return;
+	desktop.CreateSymLink(displayName.String(), targetPath.String(), NULL);
+}
+
 static int32
 InstallThreadFunc(void* data)
 {
@@ -803,12 +994,22 @@ InstallThreadFunc(void* data)
 	escaped.ReplaceAll("'", "'\\''");
 	cmd << escaped << "' 2>&1";
 
-	BString output = RunCaptured(cmd.String());
+	BString logLine("$ ");
+	logLine << cmd;
+	BMessage startLog(kMsgInstallLog);
+	startLog.AddString("text", logLine);
+	job->target.SendMessage(&startLog);
+
+	BString output = RunCapturedStreaming(cmd.String(), job->target);
+
+	bool success = IsPackageInstalled(job->name) == job->install;
+	if (success && job->install)
+		OfferDesktopIcon(job->name);
 
 	BMessage done(kMsgOpDone);
 	done.AddString("name", job->name);
 	done.AddBool("install", job->install);
-	done.AddBool("success", IsPackageInstalled(job->name) == job->install);
+	done.AddBool("success", success);
 	done.AddString("output", output);
 	job->target.SendMessage(&done);
 
@@ -1135,6 +1336,24 @@ public:
 				_HandleOpDone(message);
 				break;
 
+			case kMsgInstallLog:
+			{
+				BString text;
+				message->FindString("text", &text);
+				text << "\n";
+				int32 end = fDescriptionView->TextLength();
+				fDescriptionView->Insert(end, text.String(), text.Length());
+				// BTextView scrolls to the selection on every insert, not
+				// to whatever was just inserted -- the caret has to be
+				// moved to the end itself, every time, or the view jumps
+				// back to wherever it was left (see R InstallWizard's own
+				// AGENTS.md note on the exact same behavior).
+				int32 newEnd = fDescriptionView->TextLength();
+				fDescriptionView->Select(newEnd, newEnd);
+				fDescriptionView->ScrollToSelection();
+				break;
+			}
+
 			case kMsgIconDone:
 				_HandleIconDone(message);
 				break;
@@ -1406,6 +1625,9 @@ private:
 		fRefreshButton->SetEnabled(false);
 		fStatus->SetText(TF(install ? kInstalling : kRemoving,
 			item->PackageName().String()).String());
+		// Commandeered as this run's live log (see kMsgInstallLog) until
+		// the user selects something else.
+		fDescriptionView->SetText("");
 
 		InstallJob* job = new InstallJob;
 		job->target = BMessenger(this);
