@@ -17,7 +17,6 @@
 #include <MenuField.h>
 #include <MenuItem.h>
 #include <Message.h>
-#include <MessageRunner.h>
 #include <Messenger.h>
 #include <Node.h>
 #include <NodeInfo.h>
@@ -110,23 +109,20 @@ static const uint32 kMsgRefresh = 'RRef';
 static const uint32 kMsgSelectionChanged = 'RSel';
 static const uint32 kMsgFilterChanged = 'RFlt';
 static const uint32 kMsgSortChanged = 'RSrt';
-static const uint32 kMsgInfoDone = 'RInf';
 static const uint32 kMsgIconDone = 'RIcn';
-static const uint32 kMsgIconFetchTimer = 'RIcT';
 
-// How long a selection has to sit still before its icon is actually
-// fetched. Without this, scrolling through the list with the keyboard or
-// mouse wheel fires a selection-changed message -- and so a brand new
-// full .hpkg download -- for every row passed over, piling up a dozen
-// concurrent downloads that starve whichever one the user actually
-// stopped on (confirmed: the pile-up alone was enough to make the
-// genuinely-selected package's own fetch silently fail).
-static const bigtime_t kIconFetchDelay = 400000; // 400ms
-
-// Above this, _FetchIcon skips downloading the .hpkg at all -- the point
-// is a quick icon preview, not a way to pre-fetch large packages. Checked
-// via a HEAD request before the real download.
+// Above this, the icon prefetch skips downloading a package's .hpkg at
+// all -- the point is a quick icon, not a way to pre-fetch large
+// packages. Checked via a HEAD request before the real download.
 static const off_t kMaxIconFetchSize = 10 * 1024 * 1024;
+
+// Every package's icon is fetched in the background right after a
+// refresh (see _QueueIconFetches), not just the selected one -- but all
+// 28-ish of them at once reproduced the exact pile-up that used to
+// starve a single selected fetch (see the old debounce this replaced).
+// Capping how many of the real .hpkg downloads run concurrently keeps
+// the rest queued instead of all competing at once.
+static const int32 kMaxConcurrentIconFetches = 3;
 
 enum SortMode { kSortByPackage, kSortByRepoName };
 
@@ -175,41 +171,91 @@ IsPackageInstalled(const BString& name)
 // is a fixed two-column layout, not something that reflows.
 static const float kRepoColumnWidth = 280.0f;
 
-// A plain two-column row: repo name on the left, package name (plus an
-// "(installed)" suffix) on the right, with a vertical rule between them.
-// BStringItem can't do separate cells at all -- it is exactly one string
-// -- so this draws itself directly instead of just holding display text.
+// The actual resolution a package's icon is fetched at (see
+// IconThreadFunc) -- shared between the detail panel's own preview and
+// each row's smaller copy of the same bitmap. A row never draws its icon
+// larger than this: scaling a 48x48 bitmap down to a small row icon
+// looks fine, scaling it up past its native resolution would just blur.
+static const float kIconPreviewSize = 48.0f;
+
+// A two-line row's height depends on the view's actual font -- there's
+// no single fixed pixel count that works both at a normal desktop font
+// size and at the much larger font this port's own HiDPI test guest
+// turned out to be running (24pt, not whatever ordinary desktop size was
+// assumed here first): a hardcoded height clipped the second line
+// (shortdesc) off the bottom of every row, under a font that size, with
+// nothing visibly wrong except the description simply never appearing.
+// Computed once here from font_height so Update() (which sets the row's
+// actual height) and DrawItem() (which lays out both lines inside it)
+// never disagree about how tall a row needs to be.
+static float
+ComputeRowHeight(const font_height& fh)
+{
+	float nameLine = ceilf(fh.ascent + fh.descent + fh.leading);
+	float descLine = ceilf((fh.ascent + fh.descent) * 0.85f);
+	return 10.0f + nameLine + 3.0f + descLine;
+}
+
+// A two-line row: an icon, the package name (plus an "(installed)"
+// suffix) on the first line, and a truncated one-line blurb (see
+// PackageItem::fShortDesc) on the second -- plus the repo name in its
+// own column, vertically centered against the full two-line height, with
+// a vertical rule between them. BStringItem can't do any of this -- it
+// is exactly one string -- so this draws itself directly instead of just
+// holding display text.
 //
-// No per-row icon: an earlier version drew this app's own icon on every
-// row as a placeholder, which just reads as "the same fake icon
-// repeated 28 times", not real per-package icons -- worse than no icon.
-// The real icon (see _FetchIcon) is fetched per selection instead, at a
-// size actually worth looking at, not stamped tiny onto every row.
+// An earlier version had no per-row icon at all: a prior placeholder
+// drew this app's own icon on every row, which just read as "the same
+// fake icon repeated 28 times" -- worse than none. Real per-package
+// icons only became practical once they were fetched proactively for
+// the whole list right after a refresh (_QueueIconFetches) instead of
+// one at a time, lazily, per selection.
 class PackageItem : public BListItem {
 public:
 	PackageItem(const BString& name, const BString& repo,
-		const BString& repoUrl, bool installed)
+		const BString& repoUrl, bool installed, const BString& shortDesc,
+		const BString& fullDesc)
 		:
 		BListItem(),
 		fName(name),
 		fRepo(repo),
 		fRepoUrl(repoUrl),
-		fInstalled(installed)
+		fShortDesc(shortDesc),
+		fFullDesc(fullDesc),
+		fInstalled(installed),
+		fIcon(NULL)
 	{
+	}
+
+	~PackageItem()
+	{
+		delete fIcon;
 	}
 
 	const BString& PackageName() const { return fName; }
 	const BString& Repo() const { return fRepo; }
 	const BString& RepoUrl() const { return fRepoUrl; }
+	const BString& ShortDescription() const { return fShortDesc; }
+	const BString& FullDescription() const { return fFullDesc; }
 	bool Installed() const { return fInstalled; }
 	void SetInstalled(bool installed) { fInstalled = installed; }
+
+	// Owns whatever bitmap it's handed (deletes the previous one first);
+	// the row and the detail panel's IconPreviewView both just borrow
+	// this pointer to draw from, never delete it themselves.
+	BBitmap* Icon() const { return fIcon; }
+	void SetIcon(BBitmap* icon)
+	{
+		delete fIcon;
+		fIcon = icon;
+	}
 
 	void Update(BView* owner, const BFont* font)
 	{
 		BListItem::Update(owner, font);
 		font_height fh;
 		font->GetHeight(&fh);
-		SetHeight(ceilf(fh.ascent + fh.descent + fh.leading) + 6.0f);
+		SetHeight(ComputeRowHeight(fh));
 	}
 
 	void DrawItem(BView* owner, BRect frame, bool complete)
@@ -221,25 +267,28 @@ public:
 		owner->SetHighColor(background);
 		owner->FillRect(frame);
 
-		font_height fh;
-		owner->GetFontHeight(&fh);
-		float baseline = frame.top
-			+ (frame.Height() - (fh.ascent + fh.descent)) / 2.0f + fh.ascent;
-
 		rgb_color textColor = IsSelected()
 			? ui_color(B_LIST_SELECTED_ITEM_TEXT_COLOR)
 			: ui_color(B_LIST_ITEM_TEXT_COLOR);
+
+		BFont font;
+		owner->GetFont(&font);
+		font_height fh;
+		font.GetHeight(&fh);
+
+		// Repo column, vertically centered against the full (two-line)
+		// row height -- truncated with an ellipsis rather than widening
+		// the column to fit, since the tag is now a full hostname (see
+		// HostFromURL) and an unusually long one should clip instead of
+		// pushing into the package column.
 		owner->SetHighColor(textColor);
 		owner->SetLowColor(background);
-
-		// Truncated with an ellipsis rather than just widening the column
-		// to fit -- a repo tag is now a full hostname (see HostFromURL),
-		// and an unusually long one should clip instead of pushing into
-		// the package column.
 		BString repoText(fRepo);
 		owner->TruncateString(&repoText, B_TRUNCATE_END,
 			kRepoColumnWidth - 8);
-		owner->DrawString(repoText.String(), BPoint(frame.left + 6, baseline));
+		float repoBaseline = frame.top
+			+ (frame.Height() - (fh.ascent + fh.descent)) / 2.0f + fh.ascent;
+		owner->DrawString(repoText.String(), BPoint(frame.left + 6, repoBaseline));
 
 		rgb_color ruleColor = tint_color(background, B_DARKEN_1_TINT);
 		owner->SetHighColor(ruleColor);
@@ -247,21 +296,108 @@ public:
 			BPoint(frame.left + kRepoColumnWidth, frame.top),
 			BPoint(frame.left + kRepoColumnWidth, frame.bottom));
 
-		owner->SetHighColor(textColor);
-		BString text(fName);
-		if (fInstalled) {
-			text << "  ";
-			text << T(kInstalled);
+		// Capped at the icon's own native resolution (kIconPreviewSize) --
+		// past that it would just be upscaled and blurry, not sharper.
+		float iconSize = frame.Height() - 8.0f;
+		if (iconSize > kIconPreviewSize)
+			iconSize = kIconPreviewSize;
+
+		float iconX = frame.left + kRepoColumnWidth + 8;
+		if (fIcon != NULL) {
+			float iconY = frame.top + (frame.Height() - iconSize) / 2.0f;
+			owner->SetDrawingMode(B_OP_ALPHA);
+			owner->DrawBitmap(fIcon, BRect(iconX, iconY,
+				iconX + iconSize - 1, iconY + iconSize - 1));
+			owner->SetDrawingMode(B_OP_COPY);
 		}
-		owner->DrawString(text.String(),
-			BPoint(frame.left + kRepoColumnWidth + 8, baseline));
+
+		float textX = iconX + kIconPreviewSize + 8;
+		float maxTextWidth = frame.right - textX - 6;
+
+		// The "installed" badge is a small rounded pill drawn after the
+		// name, not appended as "(installed)" text -- measured first (in
+		// its own smaller font) so the name can be truncated to leave
+		// room for it rather than the two overlapping.
+		BString badgeLabel;
+		float badgeWidth = 0.0f, badgeHeight = 0.0f;
+		BFont badgeFont(font);
+		font_height bfh;
+		if (fInstalled) {
+			badgeFont.SetSize(font.Size() * 0.7f);
+			badgeFont.GetHeight(&bfh);
+			badgeLabel = T(kInstalled);
+			owner->SetFont(&badgeFont);
+			badgeWidth = owner->StringWidth(badgeLabel.String()) + 16.0f;
+			badgeHeight = ceilf(bfh.ascent + bfh.descent) + 8.0f;
+			owner->SetFont(&font);
+		}
+
+		owner->SetHighColor(textColor);
+		owner->SetLowColor(background);
+		BString nameText(fName);
+		owner->TruncateString(&nameText, B_TRUNCATE_END,
+			maxTextWidth - (fInstalled ? badgeWidth + 8.0f : 0.0f));
+		float nameBaseline = frame.top + 5.0f + fh.ascent;
+		owner->DrawString(nameText.String(), BPoint(textX, nameBaseline));
+
+		if (fInstalled) {
+			static const rgb_color kBadgeBackground = { 76, 175, 80, 255 };
+			static const rgb_color kBadgeTextColor = { 255, 255, 255, 255 };
+
+			float nameLineCenter = frame.top + 5.0f + (fh.ascent + fh.descent) / 2.0f;
+			float badgeLeft = textX + owner->StringWidth(nameText.String()) + 8.0f;
+			float badgeTop = nameLineCenter - badgeHeight / 2.0f;
+			BRect badgeRect(badgeLeft, badgeTop,
+				badgeLeft + badgeWidth, badgeTop + badgeHeight);
+
+			owner->SetHighColor(kBadgeBackground);
+			owner->FillRoundRect(badgeRect, badgeHeight / 2.0f, badgeHeight / 2.0f);
+
+			owner->SetFont(&badgeFont);
+			owner->SetHighColor(kBadgeTextColor);
+			owner->SetLowColor(kBadgeBackground);
+			float badgeBaseline = badgeTop
+				+ (badgeHeight - (bfh.ascent + bfh.descent)) / 2.0f + bfh.ascent;
+			owner->DrawString(badgeLabel.String(), BPoint(badgeLeft + 8.0f, badgeBaseline));
+			owner->SetFont(&font);
+			owner->SetLowColor(background);
+		}
+
+		if (fShortDesc.Length() > 0) {
+			BFont descFont(font);
+			descFont.SetSize(font.Size() * 0.85f);
+			owner->SetFont(&descFont);
+			font_height dfh;
+			descFont.GetHeight(&dfh);
+
+			// A muted version of the text color, blended toward the
+			// background rather than just darkened, so it stays legible
+			// whether the row is selected or not.
+			rgb_color descColor;
+			descColor.red = (uint8)((textColor.red + background.red) / 2);
+			descColor.green = (uint8)((textColor.green + background.green) / 2);
+			descColor.blue = (uint8)((textColor.blue + background.blue) / 2);
+			descColor.alpha = 255;
+			owner->SetHighColor(descColor);
+			owner->SetLowColor(background);
+
+			BString descText(fShortDesc);
+			owner->TruncateString(&descText, B_TRUNCATE_END, maxTextWidth);
+			float descBaseline = nameBaseline + fh.descent + 3.0f + dfh.ascent;
+			owner->DrawString(descText.String(), BPoint(textX, descBaseline));
+
+			owner->SetFont(&font);
+		}
 	}
 
 private:
 	BString fName;
 	BString fRepo;
 	BString fRepoUrl;
+	BString fShortDesc;
+	BString fFullDesc;
 	bool fInstalled;
+	BBitmap* fIcon;
 };
 
 // A plain two-label strip drawn above the list, aligned with PackageItem's
@@ -298,11 +434,13 @@ public:
 	}
 };
 
-// Shows the selected package's own real icon (see _FetchIcon), fetched
-// from its actual .hpkg -- not a placeholder. Owns whatever bitmap it is
-// handed and deletes the previous one before taking a new one.
-static const float kIconPreviewSize = 48.0f;
-
+// Shows the selected package's own real icon, fetched from its actual
+// .hpkg (see _QueueIconFetches/IconThreadFunc) -- not a placeholder.
+// Just borrows whatever bitmap it's handed; the owning PackageItem (see
+// above) is what actually deletes it, since the same bitmap is also what
+// the row itself draws from. (kIconPreviewSize itself is declared above,
+// next to PackageItem -- the row needs it too, to cap its own icon at
+// the bitmap's native resolution.)
 class IconPreviewView : public BView {
 public:
 	IconPreviewView()
@@ -314,14 +452,8 @@ public:
 		SetExplicitSize(BSize(kIconPreviewSize - 1, kIconPreviewSize - 1));
 	}
 
-	~IconPreviewView()
-	{
-		delete fBitmap;
-	}
-
 	void SetBitmap(BBitmap* bitmap)
 	{
-		delete fBitmap;
 		fBitmap = bitmap;
 		Invalidate();
 	}
@@ -353,34 +485,39 @@ struct RefreshJob {
 	BMessenger target;
 };
 
-struct InfoJob {
-	BMessenger target;
-	BString name;
-};
-
 // `pkgman info` reads straight out of the local repo index this app
-// already fetched via add-repo/refresh -- no network round-trip, no need
-// to download the package itself just to read its description.
-static int32
-InfoThreadFunc(void* data)
+// already fetched via add-repo/refresh -- no network round-trip, so this
+// runs once per package synchronously inside RefreshThreadFunc (already a
+// background thread) instead of needing its own thread per call. Pulls
+// out both the one-line blurb a row shows under its name and the full
+// text the detail panel shows on selection, so neither one ever makes
+// the user wait on a fetch triggered by clicking something -- both are
+// already sitting in the just-refreshed PackageItem.
+static void
+FetchPackageInfo(const BString& name, BString* shortDesc, BString* fullDesc)
 {
-	InfoJob* job = (InfoJob*)data;
-
 	BString cmd("pkgman info '");
-	BString escaped(job->name);
+	BString escaped(name);
 	escaped.ReplaceAll("'", "'\\''");
-	cmd << escaped << "' 2>&1";
+	cmd << escaped << "' 2>/dev/null";
 
 	BString output = RunCaptured(cmd.String());
 	output.Trim();
+	*fullDesc = output;
 
-	BMessage done(kMsgInfoDone);
-	done.AddString("name", job->name);
-	done.AddString("output", output);
-	job->target.SendMessage(&done);
+	int32 nl = output.FindFirst('\n');
+	BString firstLine = nl >= 0 ? BString(output.String(), nl) : output;
+	firstLine.Trim();
 
-	delete job;
-	return 0;
+	// pkgman always prefixes the short line with "<name>: " -- redundant
+	// once it's sitting right under the name itself on the row above it.
+	BString prefix(name);
+	prefix << ":";
+	if (firstLine.IFindFirst(prefix) == 0) {
+		firstLine.Remove(0, prefix.Length());
+		firstLine.Trim();
+	}
+	*shortDesc = firstLine;
 }
 
 // Finds `name`'s current .hpkg filename in a repo by scraping its plain
@@ -517,6 +654,7 @@ struct IconJob {
 	BMessenger target;
 	BString name;
 	BString repoUrl;
+	int32 generation;
 };
 
 // Downloads the package's own .hpkg (skipped above kMaxIconFetchSize),
@@ -589,6 +727,8 @@ IconThreadFunc(void* data)
 
 	BMessage done(kMsgIconDone);
 	done.AddString("name", job->name);
+	done.AddString("repourl", job->repoUrl);
+	done.AddInt32("generation", job->generation);
 	if (icon != NULL)
 		done.AddPointer("icon", icon);
 	job->target.SendMessage(&done);
@@ -705,6 +845,19 @@ RefreshThreadFunc(void* data)
 		}
 	}
 
+	// A "shortdesc"/"fulldesc" pair per package, same index order as
+	// "package" above (pkgman info is a local-cache read, ~30ms each --
+	// cheap enough to do for the whole list here rather than lazily per
+	// selection, so neither a row's blurb nor the detail panel's full
+	// text ever makes the user wait).
+	BString pkgName;
+	for (int32 i = 0; done.FindString("package", i, &pkgName) == B_OK; i++) {
+		BString shortDesc, fullDesc;
+		FetchPackageInfo(pkgName, &shortDesc, &fullDesc);
+		done.AddString("shortdesc", shortDesc);
+		done.AddString("fulldesc", fullDesc);
+	}
+
 	done.AddBool("success", any);
 	job->target.SendMessage(&done);
 
@@ -718,9 +871,10 @@ public:
 		:
 		BWindow(BRect(100, 100, 900, 760), T(kWindowTitle), B_TITLED_WINDOW,
 			B_ASYNCHRONOUS_CONTROLS),
-		fDetailsFetchRunner(NULL),
 		fAllPackages(20),
-		fSortMode(kSortByPackage)
+		fSortMode(kSortByPackage),
+		fActiveIconFetches(0),
+		fIconGeneration(0)
 	{
 		fListView = new BListView("packages", B_SINGLE_SELECTION_LIST);
 		fListView->SetSelectionMessage(new BMessage(kMsgSelectionChanged));
@@ -808,32 +962,25 @@ public:
 
 			case kMsgSelectionChanged:
 			{
+				// Both the description and the icon are already sitting on
+				// the PackageItem itself -- fetched up front for the whole
+				// list at refresh time (see _HandleRefreshDone and
+				// _QueueIconFetches) -- so selecting something just shows
+				// what's already there, no fetch, no wait.
 				PackageItem* item
 					= (PackageItem*)fListView->ItemAt(fListView->CurrentSelection());
 				fActionButton->SetEnabled(item != NULL);
-				delete fDetailsFetchRunner;
-				fDetailsFetchRunner = NULL;
 				if (item != NULL) {
 					fActionButton->SetLabel(item->Installed() ? T(kUninstall) : T(kInstall));
-					fDescriptionView->SetText(T(kLoading));
-					fIconPreview->SetBitmap(NULL);
-					fPendingDetailsName = item->PackageName();
-					fPendingDetailsRepoUrl = item->RepoUrl();
-					fDetailsFetchRunner = new BMessageRunner(BMessenger(this),
-						new BMessage(kMsgIconFetchTimer), kIconFetchDelay, 1);
+					fDescriptionView->SetText(item->FullDescription().Length() > 0
+						? item->FullDescription().String() : T(kNoDescription));
+					fIconPreview->SetBitmap(item->Icon());
 				} else {
 					fDescriptionView->SetText("");
-					fPendingInfoRequest = "";
-					fPendingIconRequest = "";
 					fIconPreview->SetBitmap(NULL);
 				}
 				break;
 			}
-
-			case kMsgIconFetchTimer:
-				_FetchDescription(fPendingDetailsName);
-				_FetchIcon(fPendingDetailsName, fPendingDetailsRepoUrl);
-				break;
 
 			case kMsgAction:
 			{
@@ -846,10 +993,6 @@ public:
 
 			case kMsgOpDone:
 				_HandleOpDone(message);
-				break;
-
-			case kMsgInfoDone:
-				_HandleInfoDone(message);
 				break;
 
 			case kMsgIconDone:
@@ -902,18 +1045,27 @@ private:
 		// does not delete, never MakeEmpty(), which does.
 		for (int32 i = fListView->CountItems() - 1; i >= 0; i--)
 			fListView->RemoveItem(i);
+		// Old PackageItems (and whatever icon each already had) are about
+		// to be deleted -- drop every view that might still be pointing at
+		// one of them first.
+		fIconPreview->SetBitmap(NULL);
+		fDescriptionView->SetText("");
+		fActionButton->SetEnabled(false);
 		fAllPackages.MakeEmpty();
 
-		BString name, repo, repoUrl;
+		BString name, repo, repoUrl, shortDesc, fullDesc;
 		for (int32 i = 0; message->FindString("package", i, &name) == B_OK; i++) {
 			message->FindString("repo", i, &repo);
 			message->FindString("repourl", i, &repoUrl);
-			fAllPackages.AddItem(
-				new PackageItem(name, repo, repoUrl, IsPackageInstalled(name)));
+			message->FindString("shortdesc", i, &shortDesc);
+			message->FindString("fulldesc", i, &fullDesc);
+			fAllPackages.AddItem(new PackageItem(name, repo, repoUrl,
+				IsPackageInstalled(name), shortDesc, fullDesc));
 		}
 
 		_RebuildRepoFilterMenu();
 		_RebuildVisibleList();
+		_QueueIconFetches();
 	}
 
 	// Repopulates the filter dropdown from whichever repos actually showed
@@ -1059,83 +1211,84 @@ private:
 		fStatus->SetText(TF(key, name.String()).String());
 	}
 
-	// `pkgman info` reads the local repo index, so this is fast, but it's
-	// still a subprocess -- kept off the UI thread like every other
-	// pkgman/curl call here. fPendingInfoRequest guards against a stale
-	// reply landing after the user has already selected something else.
-	void _FetchDescription(const BString& name)
+	// Fills fIconQueue with every package just listed and starts fetching
+	// (see _PumpIconQueue) -- called once per refresh, not per selection:
+	// the whole list's icons load in the background regardless of what's
+	// selected, capped at kMaxConcurrentIconFetches real .hpkg downloads
+	// at a time. fIconGeneration is bumped so any job still in flight from
+	// a previous refresh (its target PackageItems already deleted) is
+	// recognized as stale and discarded instead of applied.
+	void _QueueIconFetches()
 	{
-		fPendingInfoRequest = name;
-		fDescriptionView->SetText(T(kLoading));
-
-		InfoJob* job = new InfoJob;
-		job->target = BMessenger(this);
-		job->name = name;
-		thread_id t = spawn_thread(InfoThreadFunc, "appmarket-info",
-			B_NORMAL_PRIORITY, job);
-		if (t >= 0)
-			resume_thread(t);
-		else
-			delete job;
+		fIconGeneration++;
+		fIconQueue.MakeEmpty();
+		for (int32 i = 0; i < fAllPackages.CountItems(); i++)
+			fIconQueue.AddItem(fAllPackages.ItemAt(i));
+		_PumpIconQueue();
 	}
 
-	void _HandleInfoDone(BMessage* message)
+	void _PumpIconQueue()
 	{
-		BString name, output;
-		message->FindString("name", &name);
-		message->FindString("output", &output);
+		while (fActiveIconFetches < kMaxConcurrentIconFetches
+				&& fIconQueue.CountItems() > 0) {
+			PackageItem* item = fIconQueue.RemoveItemAt(0);
 
-		// The user may have selected a different package while this was
-		// in flight -- only apply it if it's still the one showing.
-		if (name != fPendingInfoRequest)
-			return;
-
-		if (output.Length() == 0)
-			output = T(kNoDescription);
-		fDescriptionView->SetText(output.String());
-	}
-
-	// Downloads the package's actual .hpkg in the background to read its
-	// real icon -- see IconThreadFunc for why that's the only place a
-	// real per-package icon can come from. Slower than the description
-	// fetch (a real download, not a local-cache read), so the preview is
-	// just left blank until it lands rather than shown as "loading".
-	// fPendingIconRequest guards the same stale-reply race as
-	// fPendingInfoRequest above.
-	void _FetchIcon(const BString& name, const BString& repoUrl)
-	{
-		fPendingIconRequest = name;
-		fIconPreview->SetBitmap(NULL);
-
-		IconJob* job = new IconJob;
-		job->target = BMessenger(this);
-		job->name = name;
-		job->repoUrl = repoUrl;
-		thread_id t = spawn_thread(IconThreadFunc, "appmarket-icon",
-			B_NORMAL_PRIORITY, job);
-		if (t >= 0)
-			resume_thread(t);
-		else
-			delete job;
+			IconJob* job = new IconJob;
+			job->target = BMessenger(this);
+			job->name = item->PackageName();
+			job->repoUrl = item->RepoUrl();
+			job->generation = fIconGeneration;
+			thread_id t = spawn_thread(IconThreadFunc, "appmarket-icon",
+				B_LOW_PRIORITY, job);
+			if (t >= 0) {
+				fActiveIconFetches++;
+				resume_thread(t);
+			} else {
+				delete job;
+			}
+		}
 	}
 
 	void _HandleIconDone(BMessage* message)
 	{
-		BString name;
+		BString name, repoUrl;
+		int32 generation = -1;
 		message->FindString("name", &name);
+		message->FindString("repourl", &repoUrl);
+		message->FindInt32("generation", &generation);
 
 		BBitmap* icon = NULL;
 		message->FindPointer("icon", (void**)&icon);
 
-		// Stale reply (the user already moved on) -- the icon was fetched
-		// for nothing, but still needs to be freed since nothing else
-		// owns it.
-		if (name != fPendingIconRequest) {
+		// A refresh happened while this fetch was still in flight -- the
+		// PackageItem it was for is already gone, so just free the icon
+		// and skip matching it to anything.
+		if (generation != fIconGeneration) {
 			delete icon;
-			return;
+		} else if (icon != NULL) {
+			PackageItem* target = NULL;
+			for (int32 i = 0; i < fAllPackages.CountItems(); i++) {
+				PackageItem* candidate = fAllPackages.ItemAt(i);
+				if (candidate->PackageName() == name
+						&& candidate->RepoUrl() == repoUrl) {
+					target = candidate;
+					break;
+				}
+			}
+			if (target != NULL) {
+				target->SetIcon(icon);
+				int32 visibleIndex = fListView->IndexOf(target);
+				if (visibleIndex >= 0)
+					fListView->InvalidateItem(visibleIndex);
+				if (fListView->ItemAt(fListView->CurrentSelection()) == target)
+					fIconPreview->SetBitmap(target->Icon());
+			} else {
+				delete icon;
+			}
 		}
 
-		fIconPreview->SetBitmap(icon);
+		fActiveIconFetches--;
+		_PumpIconQueue();
 	}
 
 	BListView* fListView;
@@ -1149,18 +1302,16 @@ private:
 	BStringView* fStatus;
 	BButton* fRefreshButton;
 	BButton* fActionButton;
-	BString fPendingInfoRequest;
-	BString fPendingIconRequest;
-
-	// Debounces the description/icon fetch (see kIconFetchDelay) so
-	// scrolling through the list doesn't spawn a fetch -- a real .hpkg
-	// download, for the icon -- per row passed over.
-	BMessageRunner* fDetailsFetchRunner;
-	BString fPendingDetailsName;
-	BString fPendingDetailsRepoUrl;
 
 	BObjectList<PackageItem, true> fAllPackages;
 	SortMode fSortMode;
+
+	// Background icon prefetch (see _QueueIconFetches/_PumpIconQueue).
+	// fIconQueue holds borrowed pointers only -- fAllPackages above is
+	// what owns every PackageItem.
+	BObjectList<PackageItem, false> fIconQueue;
+	int32 fActiveIconFetches;
+	int32 fIconGeneration;
 };
 
 class AppMarketApp : public BApplication {

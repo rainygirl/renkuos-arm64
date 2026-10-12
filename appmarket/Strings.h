@@ -15,7 +15,7 @@ enum StringKey {
 	kFetchingList,
 	kCouldNotReach,
 	kPackagesCount,   // "%d packages"
-	kInstalled,       // "(installed)" suffix
+	kInstalled,       // label inside the rounded "installed" row badge
 	kRefresh,
 	kInstall,
 	kUninstall,
@@ -42,7 +42,7 @@ static const char* kTable[kStringCount][6] = {
 	/* kFetchingList    */ {"Fetching package list...", "패키지 목록을 가져오는 중...", "パッケージ一覧を取得中...", "Recupero elenco pacchetti...", "Récupération de la liste des paquets...", "Obteniendo la lista de paquetes..."},
 	/* kCouldNotReach  */ {"Could not reach the repository.", "저장소에 연결할 수 없습니다.", "リポジトリに接続できませんでした。", "Impossibile raggiungere il repository.", "Impossible de joindre le dépôt.", "No se pudo contactar con el repositorio."},
 	/* kPackagesCount  */ {"%d packages", "패키지 %d개", "%d個のパッケージ", "%d pacchetti", "%d paquets", "%d paquetes"},
-	/* kInstalled      */ {"(installed)", "(설치됨)", "(インストール済み)", "(installato)", "(installé)", "(instalado)"},
+	/* kInstalled      */ {"installed", "설치됨", "インストール済み", "installato", "installé", "instalado"},
 	/* kRefresh        */ {"Refresh", "새로고침", "更新", "Aggiorna", "Actualiser", "Actualizar"},
 	/* kInstall        */ {"Install", "설치", "インストール", "Installa", "Installer", "Instalar"},
 	/* kUninstall      */ {"Uninstall", "제거", "アンインストール", "Disinstalla", "Désinstaller", "Desinstalar"},
