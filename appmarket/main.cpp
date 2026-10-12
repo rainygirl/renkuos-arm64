@@ -6,13 +6,11 @@
 // already-trusted `pkgman` and `curl` for everything that touches the
 // network or the package database, the same tools a user would run by
 // hand in Terminal.
-#include <AppFileInfo.h>
 #include <Application.h>
 #include <Bitmap.h>
 #include <Button.h>
 #include <Directory.h>
 #include <Entry.h>
-#include <File.h>
 #include <LayoutBuilder.h>
 #include <ListItem.h>
 #include <ListView.h>
@@ -20,9 +18,11 @@
 #include <MenuItem.h>
 #include <Message.h>
 #include <Messenger.h>
+#include <Node.h>
+#include <NodeInfo.h>
 #include <ObjectList.h>
+#include <Path.h>
 #include <PopUpMenu.h>
-#include <Roster.h>
 #include <ScrollView.h>
 #include <String.h>
 #include <StringView.h>
@@ -32,9 +32,9 @@
 
 #include <OS.h>
 
-#include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 #include "Strings.h"
@@ -110,6 +110,12 @@ static const uint32 kMsgSelectionChanged = 'RSel';
 static const uint32 kMsgFilterChanged = 'RFlt';
 static const uint32 kMsgSortChanged = 'RSrt';
 static const uint32 kMsgInfoDone = 'RInf';
+static const uint32 kMsgIconDone = 'RIcn';
+
+// Above this, _FetchIcon skips downloading the .hpkg at all -- the point
+// is a quick icon preview, not a way to pre-fetch large packages. Checked
+// via a HEAD request before the real download.
+static const off_t kMaxIconFetchSize = 10 * 1024 * 1024;
 
 enum SortMode { kSortByPackage, kSortByRepoName };
 
@@ -153,41 +159,37 @@ IsPackageInstalled(const BString& name)
 	return false;
 }
 
-// Column layout, in pixels: a fixed icon column, then a fixed "Repo"
-// column, then the package name filling the rest. Package names never
-// overlap either of the first two, regardless of how the BListView
-// itself is resized -- this is a fixed layout, not something that
-// reflows.
-static const float kIconColumnWidth = 32.0f;
+// How wide the "Repo" column is drawn, in pixels. Package names never
+// overlap it, regardless of how the BListView itself is resized -- this
+// is a fixed two-column layout, not something that reflows.
 static const float kRepoColumnWidth = 280.0f;
-static const float kIconSize = 24.0f;
 
-// A plain row: a generic app icon, repo name, then package name (plus an
-// "(installed)" suffix), with a vertical rule between the text columns.
+// A plain two-column row: repo name on the left, package name (plus an
+// "(installed)" suffix) on the right, with a vertical rule between them.
 // BStringItem can't do separate cells at all -- it is exactly one string
 // -- so this draws itself directly instead of just holding display text.
 //
-// Every row shares the same icon (sIcon, set once by AppMarketWindow from
-// this app's own resource -- see RAppMarket.rdef): packages.txt is just
-// names, nothing it advertises carries real per-package icon artwork, and
-// downloading each listed package's .hpkg merely to read its icon before
-// the user has asked to install anything would be a lot of network traffic
-// for a cosmetic detail.
+// No per-row icon: an earlier version drew this app's own icon on every
+// row as a placeholder, which just reads as "the same fake icon
+// repeated 28 times", not real per-package icons -- worse than no icon.
+// The real icon (see _FetchIcon) is fetched per selection instead, at a
+// size actually worth looking at, not stamped tiny onto every row.
 class PackageItem : public BListItem {
 public:
-	static BBitmap* sIcon;
-
-	PackageItem(const BString& name, const BString& repo, bool installed)
+	PackageItem(const BString& name, const BString& repo,
+		const BString& repoUrl, bool installed)
 		:
 		BListItem(),
 		fName(name),
 		fRepo(repo),
+		fRepoUrl(repoUrl),
 		fInstalled(installed)
 	{
 	}
 
 	const BString& PackageName() const { return fName; }
 	const BString& Repo() const { return fRepo; }
+	const BString& RepoUrl() const { return fRepoUrl; }
 	bool Installed() const { return fInstalled; }
 	void SetInstalled(bool installed) { fInstalled = installed; }
 
@@ -196,8 +198,7 @@ public:
 		BListItem::Update(owner, font);
 		font_height fh;
 		font->GetHeight(&fh);
-		SetHeight(std::max(ceilf(fh.ascent + fh.descent + fh.leading) + 6.0f,
-			kIconSize + 4.0f));
+		SetHeight(ceilf(fh.ascent + fh.descent + fh.leading) + 6.0f);
 	}
 
 	void DrawItem(BView* owner, BRect frame, bool complete)
@@ -208,13 +209,6 @@ public:
 		owner->SetLowColor(background);
 		owner->SetHighColor(background);
 		owner->FillRect(frame);
-
-		if (sIcon != NULL) {
-			float y = frame.top + (frame.Height() - kIconSize) / 2.0f;
-			owner->SetDrawingMode(B_OP_ALPHA);
-			owner->DrawBitmap(sIcon, BPoint(frame.left + 4, y));
-			owner->SetDrawingMode(B_OP_COPY);
-		}
 
 		font_height fh;
 		owner->GetFontHeight(&fh);
@@ -234,14 +228,13 @@ public:
 		BString repoText(fRepo);
 		owner->TruncateString(&repoText, B_TRUNCATE_END,
 			kRepoColumnWidth - 8);
-		owner->DrawString(repoText.String(),
-			BPoint(frame.left + kIconColumnWidth, baseline));
+		owner->DrawString(repoText.String(), BPoint(frame.left + 6, baseline));
 
 		rgb_color ruleColor = tint_color(background, B_DARKEN_1_TINT);
 		owner->SetHighColor(ruleColor);
 		owner->StrokeLine(
-			BPoint(frame.left + kIconColumnWidth + kRepoColumnWidth, frame.top),
-			BPoint(frame.left + kIconColumnWidth + kRepoColumnWidth, frame.bottom));
+			BPoint(frame.left + kRepoColumnWidth, frame.top),
+			BPoint(frame.left + kRepoColumnWidth, frame.bottom));
 
 		owner->SetHighColor(textColor);
 		BString text(fName);
@@ -250,16 +243,15 @@ public:
 			text << T(kInstalled);
 		}
 		owner->DrawString(text.String(),
-			BPoint(frame.left + kIconColumnWidth + kRepoColumnWidth + 8, baseline));
+			BPoint(frame.left + kRepoColumnWidth + 8, baseline));
 	}
 
 private:
 	BString fName;
 	BString fRepo;
+	BString fRepoUrl;
 	bool fInstalled;
 };
-
-BBitmap* PackageItem::sIcon = NULL;
 
 // A plain two-label strip drawn above the list, aligned with PackageItem's
 // own column layout -- BListView has no header of its own.
@@ -287,13 +279,57 @@ public:
 			+ (Bounds().Height() - (fh.ascent + fh.descent)) / 2.0f + fh.ascent;
 
 		SetHighColor(ui_color(B_PANEL_TEXT_COLOR));
-		DrawString(T(kColumnRepo), BPoint(kIconColumnWidth, baseline));
-		DrawString(T(kColumnPackage),
-			BPoint(kIconColumnWidth + kRepoColumnWidth + 8, baseline));
+		DrawString(T(kColumnRepo), BPoint(6, baseline));
+		DrawString(T(kColumnPackage), BPoint(kRepoColumnWidth + 8, baseline));
 
 		StrokeLine(BPoint(Bounds().left, Bounds().bottom),
 			BPoint(Bounds().right, Bounds().bottom));
 	}
+};
+
+// Shows the selected package's own real icon (see _FetchIcon), fetched
+// from its actual .hpkg -- not a placeholder. Owns whatever bitmap it is
+// handed and deletes the previous one before taking a new one.
+static const float kIconPreviewSize = 48.0f;
+
+class IconPreviewView : public BView {
+public:
+	IconPreviewView()
+		:
+		BView("icon-preview", B_WILL_DRAW),
+		fBitmap(NULL)
+	{
+		SetViewUIColor(B_PANEL_BACKGROUND_COLOR);
+		SetExplicitSize(BSize(kIconPreviewSize - 1, kIconPreviewSize - 1));
+	}
+
+	~IconPreviewView()
+	{
+		delete fBitmap;
+	}
+
+	void SetBitmap(BBitmap* bitmap)
+	{
+		delete fBitmap;
+		fBitmap = bitmap;
+		Invalidate();
+	}
+
+	void Draw(BRect updateRect)
+	{
+		rgb_color background = ui_color(B_PANEL_BACKGROUND_COLOR);
+		SetHighColor(background);
+		FillRect(Bounds());
+
+		if (fBitmap != NULL) {
+			SetDrawingMode(B_OP_ALPHA);
+			DrawBitmap(fBitmap, Bounds());
+			SetDrawingMode(B_OP_COPY);
+		}
+	}
+
+private:
+	BBitmap* fBitmap;
 };
 
 struct InstallJob {
@@ -336,6 +372,175 @@ InfoThreadFunc(void* data)
 	return 0;
 }
 
+// Finds `name`'s current .hpkg filename in a repo by scraping its plain
+// Apache-style `packages/` directory listing (`<a href="...">`) -- the
+// repo index pkgman itself uses for `add-repo`/`info` has no subcommand
+// to just print a resolved download URL, and old versions of a package
+// can still be listed there alongside the current one, so this picks
+// whichever matching entry has the highest `-<revision>-` number.
+static BString
+ResolveHpkgFilename(const BString& repoUrl, const BString& name)
+{
+	BString listCmd("curl -fsS '");
+	listCmd << repoUrl << "/packages/' 2>/dev/null";
+	BString listing = RunCaptured(listCmd.String());
+	if (listing.Length() == 0)
+		return BString();
+
+	BString prefix(name);
+	prefix << "-";
+	BString suffix("-");
+	suffix << CurrentArch() << ".hpkg";
+
+	BString best;
+	int32 bestRevision = -1;
+	int32 pos = 0;
+	while (true) {
+		int32 hrefPos = listing.FindFirst("href=\"", pos);
+		if (hrefPos < 0)
+			break;
+		int32 start = hrefPos + 6;
+		int32 end = listing.FindFirst("\"", start);
+		if (end < 0)
+			break;
+
+		BString candidate;
+		listing.CopyInto(candidate, start, end - start);
+		pos = end + 1;
+
+		if (candidate.FindFirst(prefix) == 0
+				&& candidate.FindLast(suffix)
+					== candidate.Length() - suffix.Length()) {
+			BString middle;
+			candidate.CopyInto(middle, prefix.Length(),
+				candidate.Length() - prefix.Length() - suffix.Length());
+			int32 lastDash = middle.FindLast('-');
+			BString revisionStr = lastDash >= 0
+				? BString(middle.String() + lastDash + 1) : middle;
+			int32 revision = atoi(revisionStr.String());
+			if (revision > bestRevision) {
+				bestRevision = revision;
+				best = candidate;
+			}
+		}
+	}
+
+	return best;
+}
+
+// `package list -p` prints one bare path per entry. The handful of R*
+// apps this repo actually ships install their main binary straight under
+// apps/ (matching the Deskbar "Applications" menu symlink jam's own
+// AddFilesToPackage convention creates), so a direct, one-level apps/*
+// entry is as reliable a guess at "the file with the package's real
+// icon" as this repo's metadata allows without hardcoding a path per
+// package. Plain CLI tools (curl, htop, gzip, ...) have no such entry at
+// all and simply get no icon -- correct, not a bug, since Haiku's own
+// generic-executable icon is what they would show for them too.
+static BString
+FindMainBinaryPath(const BString& listOutput)
+{
+	const char* p = listOutput.String();
+	while (*p != '\0') {
+		const char* nl = strchr(p, '\n');
+		size_t len = nl != NULL ? (size_t)(nl - p) : strlen(p);
+		BString line(p, (int32)len);
+		line.Trim();
+		if (line.FindFirst("apps/") == 0 && line.Length() > 5
+				&& line.FindFirst('/', 5) < 0) {
+			return line;
+		}
+		if (nl == NULL)
+			break;
+		p = nl + 1;
+	}
+	return BString();
+}
+
+struct IconJob {
+	BMessenger target;
+	BString name;
+	BString repoUrl;
+};
+
+// Downloads the package's own .hpkg (skipped above kMaxIconFetchSize),
+// extracts just its main apps/<Name> entry, and reads that file's own
+// BEOS:ICON the same way any installed app's icon is read -- no separate
+// icon metadata exists anywhere in the repo index pkgman already has, so
+// the only place a real per-package icon can come from is the package
+// itself.
+static int32
+IconThreadFunc(void* data)
+{
+	IconJob* job = (IconJob*)data;
+	BBitmap* icon = NULL;
+
+	BString hpkgName = ResolveHpkgFilename(job->repoUrl, job->name);
+	if (hpkgName.Length() > 0) {
+		BString hpkgUrl(job->repoUrl);
+		hpkgUrl << "/packages/" << hpkgName;
+
+		BString sizeCmd("curl -fsSI '");
+		sizeCmd << hpkgUrl << "' 2>/dev/null | grep -i '^content-length:'";
+		BString sizeOutput = RunCaptured(sizeCmd.String());
+		off_t size = 0;
+		int32 colon = sizeOutput.FindFirst(':');
+		if (colon >= 0)
+			size = atoll(sizeOutput.String() + colon + 1);
+
+		if (size > 0 && size <= kMaxIconFetchSize) {
+			BString tmpDir = RunCaptured("mktemp -d");
+			tmpDir.Trim();
+			if (tmpDir.Length() > 0) {
+				BString hpkgPath(tmpDir);
+				hpkgPath << "/pkg.hpkg";
+
+				BString downloadCmd("curl -fsS -o '");
+				downloadCmd << hpkgPath << "' '" << hpkgUrl << "' 2>/dev/null";
+				RunCaptured(downloadCmd.String());
+
+				BString listCmd("package list -p '");
+				listCmd << hpkgPath << "' 2>/dev/null";
+				BString binaryPath = FindMainBinaryPath(RunCaptured(listCmd.String()));
+
+				if (binaryPath.Length() > 0) {
+					BString extractCmd("package extract -C '");
+					extractCmd << tmpDir << "' '" << hpkgPath << "' '"
+						<< binaryPath << "' 2>/dev/null";
+					RunCaptured(extractCmd.String());
+
+					BString extractedPath(tmpDir);
+					extractedPath << "/" << binaryPath;
+
+					BNode node(extractedPath.String());
+					if (node.InitCheck() == B_OK) {
+						BNodeInfo nodeInfo(&node);
+						BBitmap* bitmap = new BBitmap(BRect(0, 0,
+							kIconPreviewSize - 1, kIconPreviewSize - 1), B_RGBA32);
+						if (nodeInfo.GetIcon(bitmap, B_LARGE_ICON) == B_OK)
+							icon = bitmap;
+						else
+							delete bitmap;
+					}
+				}
+
+				BString rmCmd("rm -rf '");
+				rmCmd << tmpDir << "' 2>/dev/null";
+				RunCaptured(rmCmd.String());
+			}
+		}
+	}
+
+	BMessage done(kMsgIconDone);
+	done.AddString("name", job->name);
+	if (icon != NULL)
+		done.AddPointer("icon", icon);
+	job->target.SendMessage(&done);
+
+	delete job;
+	return 0;
+}
+
 static int32
 InstallThreadFunc(void* data)
 {
@@ -363,12 +568,13 @@ InstallThreadFunc(void* data)
 }
 
 // Appends every non-blank, trimmed line of `listing` to `names` as a
-// "package"/"repo" pair (parallel arrays, same index), skipping any
-// package name already present -- a package can legitimately appear in
-// more than one repo's packages.txt, and the first repo to list it wins
-// the display tag.
+// "package"/"repo"/"repourl" triple (parallel arrays, same index),
+// skipping any package name already present -- a package can
+// legitimately appear in more than one repo's packages.txt, and the
+// first repo to list it wins the display tag.
 static void
-AppendUniqueLines(const BString& listing, const char* repo, BMessage* names)
+AppendUniqueLines(const BString& listing, const char* repo,
+	const char* repoUrl, BMessage* names)
 {
 	const char* p = listing.String();
 	while (*p != '\0') {
@@ -390,6 +596,7 @@ AppendUniqueLines(const BString& listing, const char* repo, BMessage* names)
 				if (!found) {
 					names->AddString("package", name);
 					names->AddString("repo", repo);
+					names->AddString("repourl", repoUrl);
 				}
 			}
 		}
@@ -437,7 +644,8 @@ RefreshThreadFunc(void* data)
 		BString listing = RunCaptured(listCmd.String());
 		if (listing.Length() > 0) {
 			any = true;
-			AppendUniqueLines(listing, HostFromURL(repo.url).String(), &done);
+			AppendUniqueLines(listing, HostFromURL(repo.url).String(),
+				repo.url, &done);
 		}
 	}
 
@@ -457,20 +665,6 @@ public:
 		fAllPackages(20),
 		fSortMode(kSortByPackage)
 	{
-		if (PackageItem::sIcon == NULL) {
-			app_info info;
-			if (be_app->GetAppInfo(&info) == B_OK) {
-				BFile file(&info.ref, B_READ_ONLY);
-				BAppFileInfo appFileInfo(&file);
-				BBitmap* icon = new BBitmap(
-					BRect(0, 0, kIconSize - 1, kIconSize - 1), B_RGBA32);
-				if (appFileInfo.GetIcon(icon, B_MINI_ICON) == B_OK)
-					PackageItem::sIcon = icon;
-				else
-					delete icon;
-			}
-		}
-
 		fListView = new BListView("packages", B_SINGLE_SELECTION_LIST);
 		fListView->SetSelectionMessage(new BMessage(kMsgSelectionChanged));
 		BScrollView* scroll = new BScrollView("scroll", fListView,
@@ -489,6 +683,8 @@ public:
 		fSortField = new BMenuField("sort-by", T(kSortLabel), fSortMenu);
 		fFilterMenu->SetTargetForItems(this);
 		fSortMenu->SetTargetForItems(this);
+
+		fIconPreview = new IconPreviewView();
 
 		fDescriptionView = new BTextView("description");
 		fDescriptionView->MakeEditable(false);
@@ -528,7 +724,10 @@ public:
 			.End()
 			.Add(fHeader)
 			.Add(scroll, 3)
-			.Add(descScroll, 1)
+			.AddGroup(B_HORIZONTAL, 10, 1)
+				.Add(fIconPreview)
+				.Add(descScroll)
+			.End()
 			.AddGroup(B_HORIZONTAL, 10)
 				.Add(fStatus)
 				.AddGlue()
@@ -558,8 +757,11 @@ public:
 				if (item != NULL) {
 					fActionButton->SetLabel(item->Installed() ? T(kUninstall) : T(kInstall));
 					_FetchDescription(item->PackageName());
+					_FetchIcon(item->PackageName(), item->RepoUrl());
 				} else {
 					fDescriptionView->SetText("");
+					fPendingIconRequest = "";
+					fIconPreview->SetBitmap(NULL);
 				}
 				break;
 			}
@@ -579,6 +781,10 @@ public:
 
 			case kMsgInfoDone:
 				_HandleInfoDone(message);
+				break;
+
+			case kMsgIconDone:
+				_HandleIconDone(message);
 				break;
 
 			case kMsgFilterChanged:
@@ -629,11 +835,12 @@ private:
 			fListView->RemoveItem(i);
 		fAllPackages.MakeEmpty();
 
-		BString name, repo;
+		BString name, repo, repoUrl;
 		for (int32 i = 0; message->FindString("package", i, &name) == B_OK; i++) {
 			message->FindString("repo", i, &repo);
+			message->FindString("repourl", i, &repoUrl);
 			fAllPackages.AddItem(
-				new PackageItem(name, repo, IsPackageInstalled(name)));
+				new PackageItem(name, repo, repoUrl, IsPackageInstalled(name)));
 		}
 
 		_RebuildRepoFilterMenu();
@@ -807,17 +1014,62 @@ private:
 		fDescriptionView->SetText(output.String());
 	}
 
+	// Downloads the package's actual .hpkg in the background to read its
+	// real icon -- see IconThreadFunc for why that's the only place a
+	// real per-package icon can come from. Slower than the description
+	// fetch (a real download, not a local-cache read), so the preview is
+	// just left blank until it lands rather than shown as "loading".
+	// fPendingIconRequest guards the same stale-reply race as
+	// fPendingInfoRequest above.
+	void _FetchIcon(const BString& name, const BString& repoUrl)
+	{
+		fPendingIconRequest = name;
+		fIconPreview->SetBitmap(NULL);
+
+		IconJob* job = new IconJob;
+		job->target = BMessenger(this);
+		job->name = name;
+		job->repoUrl = repoUrl;
+		thread_id t = spawn_thread(IconThreadFunc, "appmarket-icon",
+			B_NORMAL_PRIORITY, job);
+		if (t >= 0)
+			resume_thread(t);
+		else
+			delete job;
+	}
+
+	void _HandleIconDone(BMessage* message)
+	{
+		BString name;
+		message->FindString("name", &name);
+
+		BBitmap* icon = NULL;
+		message->FindPointer("icon", (void**)&icon);
+
+		// Stale reply (the user already moved on) -- the icon was fetched
+		// for nothing, but still needs to be freed since nothing else
+		// owns it.
+		if (name != fPendingIconRequest) {
+			delete icon;
+			return;
+		}
+
+		fIconPreview->SetBitmap(icon);
+	}
+
 	BListView* fListView;
 	ColumnHeaderView* fHeader;
 	BPopUpMenu* fFilterMenu;
 	BMenuField* fFilterField;
 	BPopUpMenu* fSortMenu;
 	BMenuField* fSortField;
+	IconPreviewView* fIconPreview;
 	BTextView* fDescriptionView;
 	BStringView* fStatus;
 	BButton* fRefreshButton;
 	BButton* fActionButton;
 	BString fPendingInfoRequest;
+	BString fPendingIconRequest;
 
 	BObjectList<PackageItem, true> fAllPackages;
 	SortMode fSortMode;
