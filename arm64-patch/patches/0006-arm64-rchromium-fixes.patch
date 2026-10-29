@@ -14,7 +14,7 @@ away. These are the same fixes, made part of this image's own haiku package:
 - The arm64 haiku package provides haiku_rchromium_fixes=1.
 
 diff --git a/src/data/package_infos/generic/haiku b/src/data/package_infos/generic/haiku
-index c6eced0c65..71d313bad1 100644
+index b2e36c350f..8e997950ec 100644
 --- a/src/data/package_infos/generic/haiku
 +++ b/src/data/package_infos/generic/haiku
 @@ -23,6 +23,12 @@ provides {
@@ -31,7 +31,7 @@ index c6eced0c65..71d313bad1 100644
  	cmd:arp
  	cmd:chop
 diff --git a/src/system/kernel/vm/vm.cpp b/src/system/kernel/vm/vm.cpp
-index 56638b8e46..8c67d8f47e 100644
+index b9bfb0c44a..bb06d3d844 100644
 --- a/src/system/kernel/vm/vm.cpp
 +++ b/src/system/kernel/vm/vm.cpp
 @@ -5194,8 +5194,19 @@ lock_memory_etc(team_id team, void* address, size_t numBytes, uint32 flags)

@@ -23,20 +23,26 @@ before, and no other hook can be running.
 
 Upstream Haiku has the same code; the panic is not arm64-specific.
 
-diff -ru a/src/add-ons/kernel/network/protocols/tcp/TCPEndpoint.cpp b/src/add-ons/kernel/network/protocols/tcp/TCPEndpoint.cpp
---- a/src/add-ons/kernel/network/protocols/tcp/TCPEndpoint.cpp	2026-10-09 22:28:10
-+++ b/src/add-ons/kernel/network/protocols/tcp/TCPEndpoint.cpp	2026-10-09 22:28:27
-@@ -324,7 +324,8 @@
- 	FLAG_OPTION_SACK_PERMITTED	= 0x80,
- 	FLAG_AUTO_RECEIVE_BUFFER_SIZE = 0x100,
- 	FLAG_CAN_NOTIFY 			= 0x200,
--	FLAG_USER_CLOSED			= 0x400
-+	FLAG_USER_CLOSED			= 0x400,
-+	FLAG_DELETING				= 0x800
+FLAG_DELETING is 0x2000: RenkuOS/Source has since taken 0x800 and 0x1000
+for FLAG_SEND_ERROR_REPORTED and FLAG_WAS_ESTABLISHED.
+
+diff --git a/src/add-ons/kernel/network/protocols/tcp/TCPEndpoint.cpp b/src/add-ons/kernel/network/protocols/tcp/TCPEndpoint.cpp
+index 6c4ac8d925..f295304ee0 100644
+--- a/src/add-ons/kernel/network/protocols/tcp/TCPEndpoint.cpp
++++ b/src/add-ons/kernel/network/protocols/tcp/TCPEndpoint.cpp
+@@ -328,9 +328,10 @@ enum {
+ 	FLAG_SEND_ERROR_REPORTED	= 0x800,
+ 		// a send() has reported the error that closed the connection; later
+ 		// ones fail with EPIPE (see _ClosedSendStatus())
+-	FLAG_WAS_ESTABLISHED		= 0x1000
++	FLAG_WAS_ESTABLISHED		= 0x1000,
+ 		// this connection reached ESTABLISHED; only then does a send() once
+ 		// it is CLOSED fail with the pending error or EPIPE, not ENOTCONN
++	FLAG_DELETING				= 0x2000
  };
  
  
-@@ -484,14 +485,23 @@
+@@ -490,14 +491,23 @@ TCPEndpoint::~TCPEndpoint()
  		put_endpoint_manager(fManager);
  	}
  
@@ -62,7 +68,7 @@ diff -ru a/src/add-ons/kernel/network/protocols/tcp/TCPEndpoint.cpp b/src/add-on
  	gDatalinkModule->put_route(Domain(), fRoute);
  }
  
-@@ -2661,7 +2671,8 @@
+@@ -2922,7 +2932,8 @@ TCPEndpoint::_RetransmitTimer(net_timer* timer, void* _endpoint)
  	T(TimerTriggered(endpoint, "retransmit"));
  
  	MutexLocker locker(endpoint->fLock);
@@ -71,8 +77,8 @@ diff -ru a/src/add-ons/kernel/network/protocols/tcp/TCPEndpoint.cpp b/src/add-on
 +		|| (endpoint->fFlags & FLAG_DELETING) != 0)
  		return;
  
- 	endpoint->_Retransmit();
-@@ -2679,7 +2690,8 @@
+ 	if (!endpoint->_Retransmit())
+@@ -2952,7 +2963,8 @@ TCPEndpoint::_PersistTimer(net_timer* timer, void* _endpoint)
  		return;
  
  	// the timer might not have been canceled early enough
@@ -82,7 +88,7 @@ diff -ru a/src/add-ons/kernel/network/protocols/tcp/TCPEndpoint.cpp b/src/add-on
  		return;
  
  	endpoint->_SendQueued(true);
-@@ -2697,7 +2709,8 @@
+@@ -2970,7 +2982,8 @@ TCPEndpoint::_DelayedAcknowledgeTimer(net_timer* timer, void* _endpoint)
  		return;
  
  	// the timer might not have been canceled early enough
@@ -92,7 +98,7 @@ diff -ru a/src/add-ons/kernel/network/protocols/tcp/TCPEndpoint.cpp b/src/add-on
  		return;
  
  	endpoint->_SendAcknowledge();
-@@ -2711,7 +2724,7 @@
+@@ -2984,7 +2997,7 @@ TCPEndpoint::_TimeWaitTimer(net_timer* timer, void* _endpoint)
  	T(TimerTriggered(endpoint, "time-wait"));
  
  	MutexLocker locker(endpoint->fLock);

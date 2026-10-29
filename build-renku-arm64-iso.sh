@@ -3,9 +3,9 @@
 # Build a bootable-and-installable RenkuOS arm64 ISO, from scratch, on
 # macOS.
 #
-# Clones https://github.com/RenkuOS/Source (the `nightly` tag), applies the
-# patches in arm64-patch/patches/ -- the media stack, the arm64 clock and
-# power-off, the R Chromium kernel fixes, curl/wget/grep/tar/gzip, and
+# Clones https://github.com/RenkuOS/Source at the commit the patches were
+# derived against, applies the patches in arm64-patch/patches/ -- the media
+# stack, the arm64 clock, the R Chromium kernel fixes, curl/wget/grep/tar/gzip, and
 # WebPositive -- and builds `@minimum-anyboot`: a hybrid ISO that boots
 # directly (attached as a CD-ROM) and that the Installer can also install
 # from onto a separate disk. See arm64-patch/README.md for what each patch
@@ -25,9 +25,11 @@
 #
 # Environment variables:
 #   HAIKU_TREE_GIT_URL   Default https://github.com/RenkuOS/Source.git
-#   HAIKU_TREE_GIT_REF   Branch, tag or commit to build. Default "nightly"
-#                        (a moving tag -- resolves to whatever it currently
-#                        points at).
+#   HAIKU_TREE_GIT_REF   Branch, tag or commit to build. Default: the
+#                        RenkuOS/Source commit the patches were derived
+#                        against (see arm64-patch/README.md). A branch or a
+#                        moving tag builds whatever it currently points at,
+#                        and the patches may not apply there.
 #   SKIP_CROSS_TOOLS=1   Reuse an already-built cross-toolchain instead of
 #                        rebuilding it (that step alone is roughly an hour).
 #   JOBS                 Parallelism inside the container. Default: nproc.
@@ -47,7 +49,7 @@ IMAGE_NAME="ubuntu:22.04"
 WORK_IN_CONTAINER="/root/renku-arm64-work"
 ISO_IN_CONTAINER="/root/renku-arm64.iso"
 HAIKU_TREE_GIT_URL="${HAIKU_TREE_GIT_URL:-https://github.com/RenkuOS/Source.git}"
-HAIKU_TREE_GIT_REF="${HAIKU_TREE_GIT_REF:-nightly}"
+HAIKU_TREE_GIT_REF="${HAIKU_TREE_GIT_REF:-f45bcca17e2279288a3a466ed4ed22667dd31ceb}"
 SKIP_CROSS_TOOLS="${SKIP_CROSS_TOOLS:-0}"
 JOBS="${JOBS:-}"
 
@@ -150,7 +152,7 @@ log "Fetching RenkuOS/Source"
 
 # fetch + checkout FETCH_HEAD works whether HAIKU_TREE_GIT_REF names a
 # branch, a tag, or a raw commit -- unlike origin/$REF, which only exists
-# for branches. A moving tag (nightly) resolves to whatever it currently
+# for branches. A branch or a moving tag resolves to whatever it currently
 # points at.
 log "Checking out $HAIKU_TREE_GIT_REF"
 git -C haiku fetch --quiet origin "$HAIKU_TREE_GIT_REF"

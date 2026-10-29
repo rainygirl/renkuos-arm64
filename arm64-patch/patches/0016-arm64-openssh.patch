@@ -60,7 +60,7 @@ how SetupEnvironment and data/launch/system/user get in at all), so this
 also adds SshdKeygen to its bootScripts list and a matching
 AddFilesToPackage block for data/launch/sshd.
 diff --git a/build/jam/DefaultBuildProfiles b/build/jam/DefaultBuildProfiles
-index 2999e2ae6b..4d0f6adb27 100644
+index 23f41581f7..954d8dd031 100644
 --- a/build/jam/DefaultBuildProfiles
 +++ b/build/jam/DefaultBuildProfiles
 @@ -226,6 +226,20 @@ rule DefineDefaultBuildProfiles
@@ -84,6 +84,30 @@ index 2999e2ae6b..4d0f6adb27 100644
  		}
  
  		case "test-*" : {
+diff --git a/build/jam/packages/Haiku b/build/jam/packages/Haiku
+index ff5f0c0b62..8da621c488 100644
+--- a/build/jam/packages/Haiku
++++ b/build/jam/packages/Haiku
+@@ -275,7 +275,7 @@ AddSymlinkToPackage bin : trash : untrash ;
+ AddSymlinkToPackage bin : less : more ;
+ 
+ # scripts and data files
+-local bootScripts = PostInstallScript SetupEnvironment ;
++local bootScripts = PostInstallScript SetupEnvironment SshdKeygen ;
+ SEARCH on $(bootScripts) = [ FDirName $(HAIKU_TOP) data system boot ] ;
+ AddFilesToPackage boot : $(bootScripts) ;
+ 
+@@ -287,6 +287,10 @@ local userLaunchScripts = <data!launch>user ;
+ SEARCH on $(userLaunchScripts) = [ FDirName $(HAIKU_TOP) data launch ] ;
+ AddFilesToPackage data user_launch : $(userLaunchScripts) ;
+ 
++local sshdLaunchScript = <data!launch>sshd ;
++SEARCH on $(sshdLaunchScript) = [ FDirName $(HAIKU_TOP) data launch ] ;
++AddFilesToPackage data launch : $(sshdLaunchScript) ;
++
+ # first login scripts
+ local firstLoginFiles = default_deskbar_items.sh ;
+ firstLoginFiles = $(firstLoginFiles:G=first-login) ;
 diff --git a/build/jam/repositories/HaikuPorts/arm64 b/build/jam/repositories/HaikuPorts/arm64
 index fecbe51d03..9b34d41ea3 100644
 --- a/build/jam/repositories/HaikuPorts/arm64
@@ -98,7 +122,7 @@ index fecbe51d03..9b34d41ea3 100644
  	bash
 diff --git a/data/launch/sshd b/data/launch/sshd
 new file mode 100644
-index 0000000000..51e64376e7
+index 0000000000..853d2a2685
 --- /dev/null
 +++ b/data/launch/sshd
 @@ -0,0 +1,4 @@
@@ -124,27 +148,3 @@ index 0000000000..3c90d3588c
 +[ -f "$dir/ssh_config" ] || cp /boot/system/data/openssh/ssh_config.default "$dir/ssh_config"
 +[ -f "$dir/ssh_host_rsa_key" ] || /boot/system/bin/ssh-keygen -A >/dev/null 2>&1
 +exit 0
-diff --git a/build/jam/packages/Haiku b/build/jam/packages/Haiku
-index 661c49cdf1..5a3825e9ce 100644
---- a/build/jam/packages/Haiku
-+++ b/build/jam/packages/Haiku
-@@ -253,7 +253,7 @@ AddSymlinkToPackage bin : trash : untrash ;
- AddSymlinkToPackage bin : less : more ;
- 
- # scripts and data files
--local bootScripts = PostInstallScript SetupEnvironment ;
-+local bootScripts = PostInstallScript SetupEnvironment SshdKeygen ;
- SEARCH on $(bootScripts) = [ FDirName $(HAIKU_TOP) data system boot ] ;
- AddFilesToPackage boot : $(bootScripts) ;
- 
-@@ -265,6 +265,10 @@ local userLaunchScripts = <data!launch>user ;
- SEARCH on $(userLaunchScripts) = [ FDirName $(HAIKU_TOP) data launch ] ;
- AddFilesToPackage data user_launch : $(userLaunchScripts) ;
- 
-+local sshdLaunchScript = <data!launch>sshd ;
-+SEARCH on $(sshdLaunchScript) = [ FDirName $(HAIKU_TOP) data launch ] ;
-+AddFilesToPackage data launch : $(sshdLaunchScript) ;
-+
- # first login scripts
- local firstLoginFiles = default_deskbar_items.sh ;
- firstLoginFiles = $(firstLoginFiles:G=first-login) ;

@@ -21,10 +21,11 @@ unreachable address on a SOCK_NONBLOCK socket took 75 s instead of returning
 EINPROGRESS. With this change it returns at once, verified on an image built
 from this tree. accept4() and socketpair() go through the same function.
 
-diff -ru a/src/system/kernel/fs/socket.cpp b/src/system/kernel/fs/socket.cpp
---- a/src/system/kernel/fs/socket.cpp	2026-09-30 09:39:31.143890407 +0000
-+++ b/src/system/kernel/fs/socket.cpp	2026-09-30 09:39:31.144890692 +0000
-@@ -394,6 +394,19 @@
+diff --git a/src/system/kernel/fs/socket.cpp b/src/system/kernel/fs/socket.cpp
+index 7f88705e52..25f9a6b79c 100644
+--- a/src/system/kernel/fs/socket.cpp
++++ b/src/system/kernel/fs/socket.cpp
+@@ -394,6 +394,19 @@ create_socket_fd(net_socket* socket, int flags, bool kernel)
  		SO_NONBLOCK, &nonBlock, &nonBlockLen);
  	if (error != B_OK)
  		return error;

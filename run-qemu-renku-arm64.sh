@@ -28,11 +28,11 @@
 #     address: I/O error"), and input stops working entirely.
 #   - Do not mark the installer medium readonly: the live system writes to
 #     its own boot volume.
-#   - A guest built with arm64-patch 0005 reads the PL031 clock and powers
-#     off or reboots through PSCI, so shutting down from inside the guest
-#     (Deskbar > Shut Down, or `shutdown`) ends QEMU by itself. An image
-#     without that patch starts at 1970 (every TLS certificate then fails)
-#     and stops at "safe to turn off" without ending QEMU.
+#   - A guest built with arm64-patch 0005 reads the PL031 clock; without it
+#     the guest starts at 1970 and every TLS certificate fails. Shutting
+#     down from inside the guest (Deskbar > Shut Down, or `shutdown`) ends
+#     QEMU by itself through PSCI, which RenkuOS/Source has had since
+#     024aeb68a7; an older tree stops at "safe to turn off" instead.
 #   - RENKU_AUDIO=none swaps the CoreAudio backend for silence; with
 #     CoreAudio, a recording app only gets samples if the terminal running
 #     this has microphone permission in macOS System Settings.

@@ -31,7 +31,7 @@ predate anyone building with HAIKU_NO_DOWNLOADS=1 and a clean download/, so
 the gap is fixed here instead, where it first became impossible to miss.
 
 diff --git a/build/jam/DefaultBuildProfiles b/build/jam/DefaultBuildProfiles
-index 7bf5f19b82..2999e2ae6b 100644
+index 4ca8982340..23f41581f7 100644
 --- a/build/jam/DefaultBuildProfiles
 +++ b/build/jam/DefaultBuildProfiles
 @@ -209,6 +209,23 @@ rule DefineDefaultBuildProfiles
@@ -56,7 +56,7 @@ index 7bf5f19b82..2999e2ae6b 100644
 +					;
 +			}
  		}
-
+ 
  		case "test-*" : {
 diff --git a/build/jam/repositories/HaikuPorts/arm64 b/build/jam/repositories/HaikuPorts/arm64
 index a702c4a83c..fecbe51d03 100644

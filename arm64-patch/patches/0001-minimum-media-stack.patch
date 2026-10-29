@@ -1,5 +1,5 @@
 diff --git a/build/jam/images/definitions/minimum b/build/jam/images/definitions/minimum
-index ed19fe86fc..7a4104a65e 100644
+index 01fc18c38e..b1a8385acb 100644
 --- a/build/jam/images/definitions/minimum
 +++ b/build/jam/images/definitions/minimum
 @@ -199,7 +199,9 @@ rule HaikuImageGetSystemLibs

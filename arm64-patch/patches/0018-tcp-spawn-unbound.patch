@@ -25,10 +25,10 @@ first, the way Unbind() does, so the child is bound exactly when it is
 in the hash.
 
 diff --git a/src/add-ons/kernel/network/protocols/tcp/TCPEndpoint.cpp b/src/add-ons/kernel/network/protocols/tcp/TCPEndpoint.cpp
-index 52bb0b5289..cfd1ac7a51 100644
+index f295304ee0..de50e47f1b 100644
 --- a/src/add-ons/kernel/network/protocols/tcp/TCPEndpoint.cpp
 +++ b/src/add-ons/kernel/network/protocols/tcp/TCPEndpoint.cpp
-@@ -1562,6 +1562,13 @@ TCPEndpoint::_Spawn(TCPEndpoint* parent, tcp_segment_header& segment,
+@@ -1618,6 +1618,13 @@ TCPEndpoint::_Spawn(TCPEndpoint* parent, tcp_segment_header& segment,
  
  	TRACE("Spawn()");
  

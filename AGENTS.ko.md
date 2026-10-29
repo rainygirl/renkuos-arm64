@@ -43,7 +43,7 @@ SKIP_CROSS_TOOLS=1 ./build-renku-arm64-iso.sh   # 캐시된 툴체인 재사용
 
 ## 패치
 
-`arm64-patch/patches/`에는 RenkuOS/Source에 적용하는 패치 17개가 있고,
+`arm64-patch/patches/`에는 RenkuOS/Source에 적용하는 패치 20개가 있고,
 `build-renku-arm64-iso.sh`가 빌드할 때마다 자동으로 적용합니다. 각 패치가
 정확히 뭘 바꾸고 왜 그런지는
 [`arm64-patch/README.ko.md`](arm64-patch/README.ko.md)에 파일 단위로 자세히
@@ -55,8 +55,7 @@ RenkuOS/Source의 `@minimum-mmc`/`@minimum-anyboot` 빌드 프로파일은
 일을 합니다:
 
 1. 빠진 걸 다시 채웁니다 (0001, 0012, 0014).
-2. arm64에서만 터지는 버그 세 개를 고칩니다: PL031 시계와 PSCI 전원 끄기
-   (0005), 커널/runtime_loader/app_server 수정 (0006, 0007), packagefs가
+2. arm64에서만 터지는 버그 세 개를 고칩니다: PL031 시계 (0005), 커널/runtime_loader/app_server 수정 (0006, 0007), packagefs가
    HaikuPorts 패키지를 읽을 수 있도록 zstd 지원 추가 (0009).
 3. `@minimum-anyboot`가 arm64에서도 빌드되게 만듭니다 (0003, 0004). 업스트림
    anyboot 이미지는 BIOS와 EFI를 겸하는데, 그중 세 부분이 x86 전용이라
@@ -183,7 +182,7 @@ such file or directory` 같은, 진짜 원인과는 전혀 상관없어 보이�
   Deskbar > Shutdown > Power off로 정상 종료했더니, 바이트 단위로
   동일한 파일(MD5로 확인)과 WebPositive까지 포함한 완전한 데스크탑으로
   첫 시도에 정상 부팅됐습니다. 게스트를 정상 종료하면 QEMU도 알아서
-  꺼지므로(`arm64-patch`의 0005 패치가 넣은 PSCI 지원 덕분입니다),
+  꺼지므로(RenkuOS/Source에 024aeb68a7부터 들어 있는 PSCI 전원 끄기 덕분입니다),
   애초에 강제로 닫을 이유가 없습니다.
 
 ## 알려진 한계

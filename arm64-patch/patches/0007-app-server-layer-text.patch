@@ -1,13 +1,14 @@
-Subject: [PATCH] arm64: query only valid page table entries; app_server text bounds in layers
+Subject: [PATCH] app_server: text bounds in layers
 
-Two fixes from haiku-rwebpositive-arm64, found while bringing up HaikuWebKit
-on arm64 and applicable here unchanged:
+From haiku-rwebpositive-arm64, found while bringing up HaikuWebKit on arm64
+and applicable here unchanged: PictureBoundingBoxPlayer computes a bounding
+box for text drawn inside a layer, so layered text is no longer clipped
+away (haiku-arm64-layer-text-bbox.patch).
 
-- VMSAv8TranslationMap::Query no longer reports an invalid descriptor as a
-  mapping (haiku-arm64-query-valid-pte.patch).
-- PictureBoundingBoxPlayer computes a bounding box for text drawn inside a
-  layer, so layered text is no longer clipped away
-  (haiku-arm64-layer-text-bbox.patch).
+This patch used to also stop VMSAv8TranslationMap::Query from reporting an
+invalid descriptor as a mapping. RenkuOS/Source has that fix itself since
+b71ca76473 ("arm64: don't set flags for invalid entries in
+VMSAv8TranslationMap::Query"), so it was dropped here.
 
 diff --git a/src/servers/app/PictureBoundingBoxPlayer.cpp b/src/servers/app/PictureBoundingBoxPlayer.cpp
 index f6164eb45a..2110a6f025 100644
@@ -102,26 +103,3 @@ index f6164eb45a..2110a6f025 100644
  
  void
  BoundingBoxCallbacks::SetFillRule(int32 fillRule)
-diff --git a/src/system/kernel/arch/arm64/VMSAv8TranslationMap.cpp b/src/system/kernel/arch/arm64/VMSAv8TranslationMap.cpp
-index dd44ebdc86..5d90ec0b95 100644
---- a/src/system/kernel/arch/arm64/VMSAv8TranslationMap.cpp
-+++ b/src/system/kernel/arch/arm64/VMSAv8TranslationMap.cpp
-@@ -757,6 +757,18 @@ VMSAv8TranslationMap::Query(addr_t va, phys_addr_t* pa, uint32* flags)
- 	ProcessRange(fPageTable, fInitialLevel, va, B_PAGE_SIZE, nullptr,
- 		[=](uint64_t* ptePtr, uint64_t effectiveVa) {
- 			uint64_t pte = atomic_get64((int64_t*)ptePtr);
-+
-+			// ProcessRange() hands over the slot for this address whether or
-+			// not anything is mapped there. Reporting PAGE_PRESENT for an
-+			// empty entry told the caller a page lives at physical address 0:
-+			// set_memory_protection() then looked that up and panicked with
-+			// "looking up page failed for pa 0x0". Every other Unmap/Protect
-+			// path in this file tests kPteValidMask first; only Query() did
-+			// not. It takes a guarded-heap allocation, which protects pages
-+			// it has reserved but never touched, to walk into it.
-+			if ((pte & kPteValidMask) == 0)
-+				return;
-+
- 			*pa = pte & kPteAddrMask;
- 			*flags |= PAGE_PRESENT | B_KERNEL_READ_AREA;
- 			if (is_pte_accessed(pte))

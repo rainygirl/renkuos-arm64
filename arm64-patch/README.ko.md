@@ -68,9 +68,9 @@ Launching x-vnd.haiku-media_server failed: No such file or directory
 
 | 패치 | 무엇이 잘못돼 있었나 |
 | --- | --- |
-| `0005-arm64-rtc-and-psci` | 매 부팅마다 시계가 1970년에서 시작해(PL031을 읽지 않음) 어떤 TLS 인증서도 유효하지 않았고, 종료/재부팅이 끝나지 않았습니다(PSCI 호출 없음). haiku-rwebpositive-arm64에서 가져와 맞췄습니다. |
+| `0005-arm64-pl031-rtc` | 매 부팅마다 시계가 1970년에서 시작해(PL031을 읽지 않음) 어떤 TLS 인증서도 유효하지 않았습니다. haiku-rwebpositive-arm64에서 가져와 맞췄습니다. 예전에는 PSCI 재부팅/전원 끄기도 넣었지만, RenkuOS/Source에 024aeb68a7부터 들어 있어 그 부분은 뺐습니다. |
 | `0006-arm64-rchromium-fixes` | R Chromium에 필요한 커널·runtime_loader 수정이 별도 시스템 패키지에만 있었고, 그 패키지에는 미디어 스택이 없었습니다. 이제 이 이미지의 `haiku` 패키지에 들어 있고 `haiku_rchromium_fixes`를 제공합니다. |
-| `0007-arm64-pte-and-layer-text` | haiku-rwebpositive-arm64의 수정 두 가지(페이지 테이블 조회, app_server 레이어 안 텍스트 경계). |
+| `0007-app-server-layer-text` | haiku-rwebpositive-arm64의 수정: app_server 레이어 안 텍스트 경계. 예전에는 VMSAv8TranslationMap::Query의 페이지 테이블 조회 수정도 넣었지만, RenkuOS/Source에 b71ca76473부터 들어 있어 그 부분은 뺐습니다. |
 | `0008-minimum-image-certs-and-repos` | 루트 인증서가 없었고, arm64에 존재하지 않는 HaikuPorts 저장소 설정이 있었으며, Haiku 자체 저장소의 더 새 `haiku` 패키지가 `pkgman update` 때 이 패치된 패키지를 덮어쓰게 돼 있었습니다. 이제 인증서가 들어가고 대신 RENKU Apps 저장소가 미리 설정됩니다. |
 | `0009-arm64-zstd-feature` | packagefs가 zstd 패키지를 읽지 못했습니다. HaikuPorts 패키지 전부(인증서 포함)가 zstd입니다. `packages/`의 세 패키지가 필요합니다. |
 | `0010-media-recorder-start-producer` | 녹음 앱이 사운드카드에 연결은 되지만 버퍼를 하나도 받지 못했습니다. BMediaRecorder가 생산자를 시작하지 않았습니다. |
@@ -80,7 +80,7 @@ Launching x-vnd.haiku-media_server failed: No such file or directory
 | `0014-minimum-webpositive` | WebPositive가 이미지에 아예 없었습니다: `@minimum-mmc`는 절대 빌드하지 않고(브라우저 엔진 전체를 링크해야 하는 `haikuwebkit_devel`이 필요), `@minimum-anyboot`도 같은 정의를 물려받습니다. 0012가 curl/wget을 컴파일 대신 미리 빌드된 걸로 넣듯, 이미 빌드된 `webpositive` 패키지를 그대로 넣습니다. `packages/`의 `haikuwebkit`, `sqlite3`, `dav1d`, `libavif1.0`, `noto_sans_cjk_kr`도 함께 필요합니다. 또한 arm64 저장소 목록에 `openssl3`/`openssl3_devel`을 선언하는데, 이게 통째로 빠져 있었습니다: 0008이 이미 `AddHaikuImageSystemPackages`에 `openssl3`을 넣지만, 매칭되는 저장소 항목이 한 번도 선언된 적이 없어서 `HAIKU_NO_DOWNLOADS=1`에서 `AddRepositoryPackage`가 아무 에러 없이 조용히 빠뜨렸고 -- 로컬 인덱스에 그냥 없는 것뿐 -- 의존성 solver가 `haikuwebkit`의 `lib:libcrypto` 요구를 채울 게 없었습니다. 지금까지 됐던 건 어느 예전 빌드의 `download/`에 누군가 손으로 hpkg를 넣어뒀던 게 패치로 한 번도 캡처되지 않은 채 남아있었기 때문입니다. |
 | `0015-arm64-webpositive-icu-data` | WebPositive가 실제 텍스트 레이아웃이 필요한 페이지(구글 홈페이지 등)를 열면 바로 죽었습니다: `WTF::TextBreakIteratorICU` 생성자가 ICU의 `ubrk_open()`이 실패하면 `RELEASE_ASSERT`를 겁니다. 빈/루트 로케일로도 실패했습니다. 원인: arm64의 부트스트랩 프로파일 `icu74` 패키지가 담고 있는 `libicudata.so.74`가 약 130KB짜리 스텁이라서, WebKit의 텍스트 분리에 필요한 약 30MB짜리 데이터셋이 빠져 있습니다 -- 그 전체 데이터셋은 `data/icu/74.1/icudt74l.dat`로 패키지 안에 같이 들어있지만 아무도 안 씁니다. 수정: `data/system/boot/SetupEnvironment`가 arm64에서 `ICU_DATA`를 그 경로로 export합니다 -- ICU 자체가 공식 지원하는 대체 경로 지정 방법입니다. |
 | `0016-arm64-openssh` | arm64에는 `ssh`/`sshd`가 아예 없었습니다 -- HaikuPorts의 진짜(부트스트랩 아닌) arm64 저장소 자체가 비어있습니다. `packages/openssh-10.4p1-1-arm64.hpkg`는 0012의 curl/wget과 같은 방식으로, HaikuPorts 자체의 net-misc/openssh 패치셋을 써서 크로스 빌드했습니다. libedit은 뺐습니다(arm64 패키지 목록에 없고, sftp 줄 편집 기능에만 쓰임). `data/launch/sshd`(job/service 쌍, `data/system/boot/SshdKeygen`이 먼저 호스트 키를 만든 뒤)로 부팅 시 시작하며, 둘 다 `build/jam/packages/Haiku`에 새로 등록했습니다 -- `SetupEnvironment`/`data/launch/system`/`user`와 마찬가지로, `data/` 밑의 파일이 실제로 이미지에 들어가는 유일한 방법입니다. 서비스는 `launch`로 직접이 아니라 `/bin/sh -c "sshd -D"`로 감싸서 실행합니다 -- 취향이 아니라 실패를 겪어서 정해졌습니다: 직접 launch하면 sshd 자신의 디버그 로그엔 listening 중이라고 나오는데도 모든 연결을 거부하고, `sh -c` 한 겹만 거치면 매번 제대로 됩니다. launch_daemon 내부까지 원인을 찾지는 못했습니다. |
-| `0017-tcp-timer-teardown` | 재전송 타이머가 이미 실행 중일 때 TCP 엔드포인트를 지우면 커널 패닉이 났습니다(`TCPEndpoint::_RetransmitTimer`에서 `_mutex_lock(): using uninitialized lock`, "net timer" 스레드). 소멸자가 타이머 훅을 기다리기 전에 엔드포인트의 락을 없앴기 때문입니다. 이제 엔드포인트에 표시를 하고 락을 푼 뒤 훅이 끝나기를 기다리고, 락은 마지막에 없앱니다. 업스트림 Haiku에도 같은 경합이 있습니다. 릴리스 커널에서는 드러나지 않고, 이 이미지의 KDEBUG 커널에서는 패닉이 납니다. |
+| `0017-tcp-timer-teardown` | 재전송 타이머가 이미 실행 중일 때 TCP 엔드포인트를 지우면 커널 패닉이 났습니다(`TCPEndpoint::_RetransmitTimer`에서 `_mutex_lock(): using uninitialized lock`, "net timer" 스레드). 소멸자가 타이머 훅을 기다리기 전에 엔드포인트의 락을 없앴기 때문입니다. 이제 엔드포인트에 표시를 하고 락을 푼 뒤 훅이 끝나기를 기다리고, 락은 마지막에 없앱니다. 업스트림 Haiku에도 같은 경합이 있습니다. 릴리스 커널에서는 드러나지 않고, 이 이미지의 KDEBUG 커널에서는 패닉이 납니다. 표시는 `FLAG_DELETING = 0x2000`입니다. RenkuOS/Source가 그 사이 0x800과 0x1000을 다른 플래그에 썼습니다. |
 | `0018-tcp-spawn-unbound` | 대기 중인 연결 하나가 준비에 실패한 상태에서 listen 소켓을 해제하면 커널 패닉이 났습니다(sshd의 `close`에서 `EndpointManager::Unbind`의 `bound endpoint ... not in hash!`). 새 연결 소켓은 listen 소켓의 로컬 주소(`0.0.0.0:22`)를 물려받습니다. 그래서 `BindChild()`가 엔드포인트 해시에 넣기 전부터 바인드된 것처럼 보였습니다. `_Spawn()`이 그 전에 실패하면 `Unbind()`가 해시에서 찾지 못했습니다. 예를 들어 종료 중 인터페이스가 내려가 SYN의 목적지가 더 이상 로컬 주소가 아니면 이렇게 됩니다. 이제 `_Spawn()`이 물려받은 주소를 먼저 지웁니다. x86_64 VM에서 수정 전에는 재부팅 13회 중 8회, 수정 후에는 15회 중 0회 패닉이 났습니다. |
 | `0019-net-notifications-keep-loaded` | 부팅이 교착될 수 있었습니다. net_server가 네트워크 알림 모듈을 내리면서 모듈 락을 쥔 채 `unregister_generic_syscall()`에서 진행 중인 `net_notifications_control()` 호출을 기다렸습니다. 그 호출(launch_daemon의 리스너 추가)은 `FirstAdded()` -> `get_module()`에서 같은 모듈 락을 기다리고 있었습니다. 이제 모듈은 `B_KEEP_LOADED`이고, `FirstAdded()`/`LastRemoved()`는 `get_module()`/`put_module()`을 부르지 않습니다. x86_64 부팅 14회 중 1회 발생했습니다. |
 | `0020-minimum-rappmarket` | R AppMarket(창 하나로 등록된 각 pkgman 저장소의 모든 앱을 찾아보고 설치)을 쓰려면 먼저 손으로 `pkgman install`부터 해야 했습니다 -- RENKU Apps의 나머지를 설치하는 데 가장 먼저 필요한 바로 그 앱인데도요. 0012/0016이 빌드된 curl/openssh를 올리는 것과 같은 방식으로 패키지를 올립니다: `packages/rappmarket-1.0.0-4-arm64.hpkg`를 arm64 저장소 목록과 `AddHaikuImageSystemPackages`에 선언했습니다. |
@@ -108,13 +108,20 @@ cp packages/*.hpkg /path/to/generated.arm64/download/
 ## 확인
 
 RenkuOS/Source의 커밋
-[`47367b99ab8af5934adb4e709e9c0eaeb6485255`](https://github.com/RenkuOS/Source/commit/47367b99ab8af5934adb4e709e9c0eaeb6485255)
-(2026-09-03)에서 뽑아내고 같은 커밋으로 검증했습니다. 2026-09-29 기준으로
-`nightly` 태그가 가리키던 커밋입니다. 이 태그는 움직이므로, 충분히 옮겨가면
-패치가 더 이상 적용되지 않습니다. 그때 `build-renku-arm64-iso.sh`는 반쯤
-적용된 트리를 남기지 않고 그 사실을 알립니다.
+[`f45bcca17e2279288a3a466ed4ed22667dd31ceb`](https://github.com/RenkuOS/Source/commit/f45bcca17e2279288a3a466ed4ed22667dd31ceb)
+(2026-10-28)에 맞춰 다시 뽑았습니다. `build-renku-arm64-iso.sh`가 기본으로
+체크아웃하는 커밋입니다. 이 커밋을 깨끗하게 받아 20개 패치를 모두 적용하고
+`@minimum-anyboot`를 빌드했고, 그 ISO를 QEMU(`hvf`, `virtio-gpu-pci`,
+`intel-hda`)에 유일한 USB 디스크로 붙여 데스크톱까지 부팅했습니다. PL031
+시계가 실제 날짜를 읽고, `hda` 드라이버가 올라와 스트림이 설정되고,
+`sshd`가 22번 포트에서 응답하고, Deskbar > Shut down으로 게스트가 꺼지면서
+QEMU도 스스로 끝났습니다. 다른 트리에는 패치가 적용되지 않을 수 있습니다.
+그때 `build-renku-arm64-iso.sh`는 반쯤 적용된 트리를 남기지 않고 그 사실을
+알립니다.
 
-그 커밋으로 빌드해 Apple Silicon의 QEMU에서 부팅했습니다
+처음에는 커밋
+[`47367b99ab8af5934adb4e709e9c0eaeb6485255`](https://github.com/RenkuOS/Source/commit/47367b99ab8af5934adb4e709e9c0eaeb6485255)
+(2026-09-03)에서 뽑았고, 그 커밋으로 빌드해 Apple Silicon의 QEMU에서 부팅했습니다
 (`qemu-system-aarch64`, `hvf`, `-device intel-hda -device hda-duplex`).
 
 ```

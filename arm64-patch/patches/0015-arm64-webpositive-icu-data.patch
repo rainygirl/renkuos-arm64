@@ -28,9 +28,11 @@ the `desktop` target in data/launch/user, so everything launched from
 Deskbar/Tracker (WebPositive included) inherits it; gated on `uname -m`
 so it's a no-op on any architecture that isn't missing a real icu74.
 
+diff --git a/data/system/boot/SetupEnvironment b/data/system/boot/SetupEnvironment
+index 01d2892d6b..4b2a65ef00 100644
 --- a/data/system/boot/SetupEnvironment
 +++ b/data/system/boot/SetupEnvironment
-@@ -26,6 +26,20 @@
+@@ -26,6 +26,20 @@ export BUILDHOME
  export BEINCLUDES
  export BE_HOST_CPU
  

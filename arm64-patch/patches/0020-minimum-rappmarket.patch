@@ -17,10 +17,11 @@ rebuilt from the same recipe as the "RENKU" one published live on
 pkgman.rainygirl.com, just with REPO_VENDOR set to "Haiku Project" for
 this one copy -- same binary, different vendor metadata only.
 
-diff -ru a/build/jam/DefaultBuildProfiles b/build/jam/DefaultBuildProfiles
---- a/build/jam/DefaultBuildProfiles	2026-10-09 13:01:32.000000000 +0000
-+++ b/build/jam/DefaultBuildProfiles	2026-10-12 19:55:29.000000000 +0000
-@@ -240,6 +240,15 @@
+diff --git a/build/jam/DefaultBuildProfiles b/build/jam/DefaultBuildProfiles
+index 954d8dd031..9768582ca5 100644
+--- a/build/jam/DefaultBuildProfiles
++++ b/build/jam/DefaultBuildProfiles
+@@ -240,6 +240,15 @@ rule DefineDefaultBuildProfiles
  					openssh
  					;
  			}
@@ -34,12 +35,13 @@ diff -ru a/build/jam/DefaultBuildProfiles b/build/jam/DefaultBuildProfiles
 +					;
 +			}
  		}
-
+ 
  		case "test-*" : {
-diff -ru a/build/jam/repositories/HaikuPorts/arm64 b/build/jam/repositories/HaikuPorts/arm64
---- a/build/jam/repositories/HaikuPorts/arm64	2026-10-09 13:01:32.000000000 +0000
-+++ b/build/jam/repositories/HaikuPorts/arm64	2026-10-12 19:55:42.000000000 +0000
-@@ -72,6 +72,8 @@
+diff --git a/build/jam/repositories/HaikuPorts/arm64 b/build/jam/repositories/HaikuPorts/arm64
+index 9b34d41ea3..9db7e59bf0 100644
+--- a/build/jam/repositories/HaikuPorts/arm64
++++ b/build/jam/repositories/HaikuPorts/arm64
+@@ -72,6 +72,8 @@ RemotePackageRepository HaikuPorts
  	sqlite3-3.50.4-1
  	webpositive-r1~beta6_hrev99000_dirty-1
  	openssh-10.4p1-1

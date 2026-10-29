@@ -19,13 +19,16 @@ architecture, plus a few fixes that only bite on arm64:
 | Browser | Not built | WebPositive |
 | Command line | No `curl`, `wget`, `tar`, `gzip` | All included |
 | System clock | Starts at 1970 every boot (so TLS fails) | Reads the real-time clock |
-| Shutdown / reboot | Never completes | Works |
 | Installable medium | `@minimum-anyboot` does not build for arm64 at all | Builds, boots, and installs to a disk |
 | Korean / Japanese / Chinese text | Draws as empty boxes | A bundled font covers it |
 | R Chromium | Missing kernel fixes it needs | Included |
 | SSH | Not on HaikuPorts for arm64 at all | `sshd` runs at boot |
+| App installer | None | R AppMarket on the image |
+| Package repositories | No root certificates; the configured HaikuPorts repository has no arm64 packages | Certificates included; the RENKU Apps repository is preconfigured |
+| HaikuPorts packages | packagefs cannot read zstd packages, which is nearly all of them | Read and installed normally |
+| Kernel stability | Panics when a TCP connection is torn down mid-timer, or while the network goes down | Fixed |
 
-The technical detail -- exactly what each of the 17 patches changes and
+The technical detail -- exactly what each of the 20 patches changes and
 why -- is in [`AGENTS.md`](AGENTS.md) and [`arm64-patch/README.md`](arm64-patch/README.md).
 
 ## Requirements

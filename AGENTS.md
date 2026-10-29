@@ -37,7 +37,7 @@ clear error. The disk (`renku-arm64-vm.img`) persists between runs.
 
 ## The patch
 
-`arm64-patch/patches/` is 17 patches against RenkuOS/Source, applied by
+`arm64-patch/patches/` is 20 patches against RenkuOS/Source, applied by
 `build-renku-arm64-iso.sh`. What each one changes and why is documented
 file-by-file in [`arm64-patch/README.md`](arm64-patch/README.md) -- this
 section only summarizes the shape of it.
@@ -45,8 +45,8 @@ section only summarizes the shape of it.
 RenkuOS/Source's `@minimum-mmc`/`@minimum-anyboot` profiles are deliberately
 minimal on every architecture: no media stack, no browser, barely any CLI
 tools. The patch adds those back (0001, 0012, 0014), fixes three things
-that only break on arm64 (0005 the PL031 clock and PSCI power-off, 0006 and
-0007 kernel/runtime_loader/app_server fixes, 0009 zstd package support so
+that only break on arm64 (0005 the PL031 clock, 0006 and 0007
+kernel/runtime_loader/app_server fixes, 0009 zstd package support so
 packagefs can read anything HaikuPorts ships), and makes `@minimum-anyboot`
 buildable for arm64 at all (0003, 0004 -- upstream's anyboot image is
 BIOS+EFI and three of its pieces are x86-only).
@@ -151,8 +151,9 @@ Settled by hitting the failure, not preference:
   rebuilding the same install and using Deskbar > Shutdown > Power off
   before ever quitting QEMU produced byte-identical files (MD5-verified)
   and a clean boot to a full desktop, WebPositive included, on the first
-  try. A clean guest shutdown also powers QEMU off by itself (`arm64-patch`
-  0005's PSCI support), so there is no reason to force it closed.
+  try. A clean guest shutdown also powers QEMU off by itself (PSCI
+  power-off, in RenkuOS/Source since 024aeb68a7), so there is no reason to
+  force it closed.
 
 ## Known limitations
 

@@ -15,7 +15,7 @@ Subject: [PATCH] minimum image: root certificates, and only repositories that fi
   be installed with pkgman straight away.
 
 diff --git a/build/jam/DefaultBuildProfiles b/build/jam/DefaultBuildProfiles
-index 9bae1739c6..41dff883bb 100644
+index 1624aa58f8..82b1bef7be 100644
 --- a/build/jam/DefaultBuildProfiles
 +++ b/build/jam/DefaultBuildProfiles
 @@ -184,7 +184,11 @@ rule DefineDefaultBuildProfiles
@@ -31,7 +31,7 @@ index 9bae1739c6..41dff883bb 100644
  				;
  		}
 diff --git a/build/jam/images/definitions/minimum b/build/jam/images/definitions/minimum
-index 7a4104a65e..496af4ec5d 100644
+index b1a8385acb..55df87bf1c 100644
 --- a/build/jam/images/definitions/minimum
 +++ b/build/jam/images/definitions/minimum
 @@ -445,6 +445,17 @@ AddFilesToHaikuImage system settings network : $(networkSettingsFiles) ;
@@ -52,9 +52,9 @@ index 7a4104a65e..496af4ec5d 100644
  	local config = [ on $(repository) return $(HAIKU_REPOSITORY_CONFIG_FILE) ] ;
  	local cache = [ on $(repository) return $(HAIKU_REPOSITORY_CACHE_FILE) ] ;
  	if $(HAIKU_UPDATE_ALL_PACKAGES) {
-@@ -455,3 +466,13 @@ for repository in $(HAIKU_REPOSITORIES) {
- 	AddFilesToHaikuImage system cache package-repositories
- 		: $(cache) : $(repository:G=) ;
+@@ -468,3 +479,13 @@ if $(HAIKU_IS_BOOTSTRAP) != 1 {
+ 	AddFilesToHaikuImage system settings package-repositories
+ 		: $(thirdPartyRepositoryConfigs) ;
  }
 +
 +# On arm64 the applications come from the RENKU Apps repository; ship its
