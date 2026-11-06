@@ -42,6 +42,7 @@ why -- is in [`AGENTS.md`](AGENTS.md) and [`arm64-patch/README.md`](arm64-patch/
 The ISO built from RenkuOS/Source commit `8484655099aae479b59590d098dfcbf6fdc4d908`
 is `renku-arm64.iso` (SHA-256:
 `a17e71567b58539af254746c6c3fad4df79331d9cb0ff183bfc50de114c06168`).
+[Download it from the GitHub release](https://github.com/rainygirl/renkuos-arm64/releases/tag/2026.11.06).
 
 ## Building the ISO
 

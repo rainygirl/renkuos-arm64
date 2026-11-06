@@ -43,6 +43,7 @@ arm64 포팅 자체를 패치하는 건 없습니다. 이 디렉터리가 더하
 RenkuOS/Source 커밋 `8484655099aae479b59590d098dfcbf6fdc4d908`에서 빌드한
 `renku-arm64.iso`의 SHA-256은
 `a17e71567b58539af254746c6c3fad4df79331d9cb0ff183bfc50de114c06168`입니다.
+[GitHub 릴리스에서 다운로드](https://github.com/rainygirl/renkuos-arm64/releases/tag/2026.11.06)할 수 있습니다.
 
 ## ISO 빌드
 
