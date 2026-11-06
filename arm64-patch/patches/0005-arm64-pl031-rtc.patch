@@ -10,17 +10,21 @@ arch_rtc_init() reads real time.
 
 This patch used to also make reboot and power-off work through PSCI.
 RenkuOS/Source has that itself since 024aeb68a7 ("arm64: power off and
-reboot through PSCI"), so only the clock is left here; the PL031 field sits
-next to upstream's psci_conduit in arch_kernel_args.
+reboot through PSCI"), so only the clock is left here; the pl031_rtc field
+sits right after upstream's own psci_conduit in arch_kernel_args, ahead of
+2fe0ded501's later cacheable_memory_range addition to the same struct (the
+only reason this patch needed regenerating once upstream moved past this
+project's original pin -- the two additions land at the same point in the
+file and the second one's context no longer matches without it).
 
 Taken from haiku-rwebpositive-arm64 (haiku-arm64-pl031-rtc.patch) and
 adapted to this tree.
 
 diff --git a/headers/private/kernel/arch/arm64/arch_kernel_args.h b/headers/private/kernel/arch/arm64/arch_kernel_args.h
-index 2a63ec3cd7..83acd537f9 100644
+index 2cd3a93200..122cf232d7 100644
 --- a/headers/private/kernel/arch/arm64/arch_kernel_args.h
 +++ b/headers/private/kernel/arch/arm64/arch_kernel_args.h
-@@ -38,6 +38,10 @@ typedef struct {
+@@ -39,6 +39,10 @@ typedef struct {
  	// PSCI conduit for SYSTEM_OFF/SYSTEM_RESET: 0 none, 1 smc, 2 hvc
  	uint32		psci_conduit;
  
@@ -28,9 +32,9 @@ index 2a63ec3cd7..83acd537f9 100644
 +	// size is 0 when the device tree names none.
 +	addr_range	pl031_rtc;
 +
- } _PACKED arch_kernel_args;
- 
- #endif	/* KERNEL_ARCH_ARM64_KERNEL_ARGS_H */
+ 	// Physical memory the firmware reports as write-back cacheable (EFI
+ 	// memory map entries with EFI_MEMORY_WB, other than MMIO). Unlike
+ 	// physical_memory_range, this includes the ACPI tables and other
 diff --git a/src/system/boot/platform/efi/arch/arm64/arch_acpi.cpp b/src/system/boot/platform/efi/arch/arm64/arch_acpi.cpp
 index dae8308bc9..cad3cd9eb1 100644
 --- a/src/system/boot/platform/efi/arch/arm64/arch_acpi.cpp

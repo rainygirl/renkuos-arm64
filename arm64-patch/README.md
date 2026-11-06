@@ -63,14 +63,14 @@ be booted to a desktop, for the reason given under
 That is the one that yields a medium you can boot *and* install from.
 
 
-### Beyond audio: 0005-0013
+### Beyond audio: 0005-0020
 
 What testing every application on an installed arm64 system turned up, fixed
 in the image rather than worked around in it:
 
 | Patch | What was wrong |
 | --- | --- |
-| `0005-arm64-pl031-rtc` | The clock started at 1970 on every boot (the PL031 was never read), so no TLS certificate was valid. Taken from haiku-rwebpositive-arm64 and adapted. It used to also add PSCI reboot and power-off; RenkuOS/Source has had that since 024aeb68a7, so that half was dropped. |
+| `0005-arm64-pl031-rtc` | The clock started at 1970 on every boot (the PL031 was never read), so no TLS certificate was valid. Taken from haiku-rwebpositive-arm64 and adapted. It used to also add PSCI reboot and power-off; RenkuOS/Source has had that since 024aeb68a7, so that half was dropped. Regenerated once since, when upstream's `2fe0ded501` added an unrelated field (`cacheable_memory_range`) to the same struct right where this patch's own `pl031_rtc` field went -- same change, new context, `pl031_rtc` now sits just ahead of it instead. |
 | `0006-arm64-rchromium-fixes` | R Chromium needs kernel and runtime_loader fixes that only a separate system package carried, and that package has no media stack. They are now in this image's own `haiku` package, which provides `haiku_rchromium_fixes`. |
 | `0007-app-server-layer-text` | From haiku-rwebpositive-arm64: text bounds in app_server layers. It used to also fix the page table query in VMSAv8TranslationMap::Query; RenkuOS/Source has had that since b71ca76473, so that half was dropped. |
 | `0008-minimum-image-certs-and-repos` | No root certificates; a HaikuPorts config for a repository that does not exist on arm64; and Haiku's own repository, whose newer `haiku` package would replace this patched one on `pkgman update`. Now: certificates, and the RENKU Apps repository preconfigured instead. |
@@ -83,7 +83,7 @@ in the image rather than worked around in it:
 | `0015-arm64-webpositive-icu-data` | WebPositive crashed opening any page needing real text layout (google.com, reliably): `WTF::TextBreakIteratorICU`'s constructor calls `RELEASE_ASSERT` when ICU's `ubrk_open()` fails, and it failed even for the empty/root locale. Cause: arm64's bootstrap-profile `icu74` package ships a `libicudata.so.74` that is a ~130 KiB stub, not the ~30 MiB dataset WebKit needs for break iteration -- that full dataset sits unused right next to it as a loose `data/icu/74.1/icudt74l.dat`. Fix: `data/system/boot/SetupEnvironment` now exports `ICU_DATA` at that path on arm64, which is ICU's own documented override for exactly this. |
 | `0016-arm64-openssh` | arm64 had no `ssh`/`sshd` at all -- not even on HaikuPorts' real (non-bootstrap) arm64 repository, which is empty. `packages/openssh-10.4p1-1-arm64.hpkg` is cross-built the same way 0012's curl/wget are, using HaikuPorts' own net-misc/openssh patchset, minus libedit (not in the arm64 package set; only gives sftp line-editing). Starts at boot via `data/launch/sshd` (a `job`/`service` pair, after `data/system/boot/SshdKeygen` generates host keys), both newly registered in `build/jam/packages/Haiku` alongside `SetupEnvironment`/`data/launch/system`/`user`, the only way files under `data/` actually ship. The service launches through `/bin/sh -c "sshd -D"` rather than a direct `launch` -- settled by hitting the failure: direct launch leaves sshd running and listening by its own debug log, yet refuses every connection, and going through one layer of `sh -c` fixes it every time; not root-caused inside launch_daemon. |
 | `0017-tcp-timer-teardown` | The kernel panicked (`_mutex_lock(): using uninitialized lock` in `TCPEndpoint::_RetransmitTimer`, thread "net timer") when a TCP endpoint was deleted while its retransmit timer was already firing: the destructor destroyed the endpoint's lock before waiting for the timer hooks. It now marks the endpoint, unlocks, waits for the hooks, and destroys the lock last. Upstream Haiku has the same race; a release kernel hides it, the image's KDEBUG kernel panics. The mark is `FLAG_DELETING = 0x2000`; RenkuOS/Source has since taken 0x800 and 0x1000. |
-| `0018-tcp-spawn-unbound` | The kernel panicked (`bound endpoint ... not in hash!` in `EndpointManager::Unbind`, from sshd's `close`) when a listening socket was freed while one of its pending connections had failed to set up. The new connection's socket inherits the listener's local address (`0.0.0.0:22`), so it looked bound even though only `BindChild()` puts it into the endpoint hash. When `_Spawn()` failed before that point, for example because the SYN's destination was no longer a local address while the interfaces were going down at shutdown, `Unbind()` found it missing. `_Spawn()` now clears the inherited address first. Hit on 8 of 13 reboots of an x86_64 VM; 0 of 15 with the fix. |
+| *(0018 retired)* | `0018-tcp-spawn-unbound` fixed a `_Spawn()` panic (`bound endpoint ... not in hash!`) the same way upstream's own `96d06c2e46` ("tcp: _Spawn() resets local address", cherry-picked from mainline Haiku) now does -- identical one-line fix, same file, same spot. Removed outright rather than kept empty like 0005/0007: nothing of it is this project's own anymore. The gap in the numbering is deliberate, not a renumber of everything after it. |
 | `0019-net-notifications-keep-loaded` | The boot could deadlock. net_server was unloading the network notifications module and held the module lock while `unregister_generic_syscall()` waited for an in-flight `net_notifications_control()` call. That call (launch_daemon adding a listener) was itself waiting for the module lock in `FirstAdded()` -> `get_module()`. The module is now `B_KEEP_LOADED`, and `FirstAdded()`/`LastRemoved()` no longer call `get_module()`/`put_module()`. Seen once in 14 x86_64 boots. |
 | `0020-minimum-rappmarket` | R AppMarket (browse and install every app in each pkgman repository it knows about, from a window) had to be `pkgman install`ed by hand before a fresh guest could use it to install anything else in RENKU Apps. Ships the package the same way 0012/0016 ship prebuilt curl/openssh: `packages/rappmarket-1.0.0-4-arm64.hpkg`, declared in the arm64 repository list and `AddHaikuImageSystemPackages`. |
 
@@ -111,9 +111,24 @@ cp packages/*.hpkg /path/to/generated.arm64/download/
 ## Verified
 
 Re-derived against RenkuOS/Source commit
+[`4e5de412da344adf76bb2fa5bb68c8b970e961a3`](https://github.com/RenkuOS/Source/commit/4e5de412da344adf76bb2fa5bb68c8b970e961a3)
+(2026-11-06), which `build-renku-arm64-iso.sh` checks out by default. 154
+commits had landed on top of the previous pin; two touched a file one of
+these patches also touches. `0018-tcp-spawn-unbound` turned out to be
+upstream already -- `96d06c2e46` ("tcp: _Spawn() resets local address") is
+the identical fix, cherry-picked from mainline Haiku, so that patch is
+gone. `0005-arm64-pl031-rtc` needed regenerating, not removing: an
+unrelated commit (`2fe0ded501`, cacheable memory ranges for ACPI) adds its
+own new field to `arch_kernel_args` at the exact point this patch's own
+`pl031_rtc` field used to go, so the old diff's context no longer matched;
+the field now sits just ahead of it instead, same struct, same semantics.
+On a clean checkout of the new pin all 19 remaining patches apply,
+`@minimum-anyboot` builds, and
+
+Re-derived once before that, against RenkuOS/Source commit
 [`f45bcca17e2279288a3a466ed4ed22667dd31ceb`](https://github.com/RenkuOS/Source/commit/f45bcca17e2279288a3a466ed4ed22667dd31ceb)
-(2026-10-28), which `build-renku-arm64-iso.sh` checks out by default. On a
-clean checkout of it all 20 patches apply, `@minimum-anyboot` builds, and
+(2026-10-28). On a clean checkout of it all 20 patches (0018 included, not
+yet redundant) applied, `@minimum-anyboot` built, and
 the ISO, attached as the only USB disk under QEMU (`hvf`, `virtio-gpu-pci`,
 `intel-hda`), boots to the desktop: the PL031 clock reads the real date,
 the `hda` driver loads and its streams are set up, `sshd` answers on port
