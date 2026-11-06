@@ -49,7 +49,7 @@ IMAGE_NAME="ubuntu:22.04"
 WORK_IN_CONTAINER="/root/renku-arm64-work"
 ISO_IN_CONTAINER="/root/renku-arm64.iso"
 HAIKU_TREE_GIT_URL="${HAIKU_TREE_GIT_URL:-https://github.com/RenkuOS/Source.git}"
-HAIKU_TREE_GIT_REF="${HAIKU_TREE_GIT_REF:-4e5de412da344adf76bb2fa5bb68c8b970e961a3}"
+HAIKU_TREE_GIT_REF="${HAIKU_TREE_GIT_REF:-8484655099aae479b59590d098dfcbf6fdc4d908}"
 SKIP_CROSS_TOOLS="${SKIP_CROSS_TOOLS:-0}"
 JOBS="${JOBS:-}"
 
@@ -150,13 +150,18 @@ log "Fetching RenkuOS/Source"
 [ -d buildtools/.git ] || git clone https://github.com/haiku/buildtools.git
 [ -d haiku/.git ] || git clone "$HAIKU_TREE_GIT_URL" haiku
 
+# This checkout is owned by the build. A previous run may have left the
+# patches applied, so clean tracked changes before switching to FETCH_HEAD.
+git -C haiku reset --quiet --hard
+git -C haiku clean -qfdx -e generated.arm64
+
 # fetch + checkout FETCH_HEAD works whether HAIKU_TREE_GIT_REF names a
 # branch, a tag, or a raw commit -- unlike origin/$REF, which only exists
 # for branches. A branch or a moving tag resolves to whatever it currently
 # points at.
 log "Checking out $HAIKU_TREE_GIT_REF"
 git -C haiku fetch --quiet origin "$HAIKU_TREE_GIT_REF"
-git -C haiku checkout --quiet --detach FETCH_HEAD
+git -C haiku checkout --quiet --force --detach FETCH_HEAD
 git -C haiku reset --quiet --hard FETCH_HEAD
 git -C haiku clean -qfdx -e generated.arm64
 git -C haiku log -1 --oneline

@@ -77,7 +77,7 @@
 set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-DISK="$DIR/renku-arm64-vm.img"
+DISK="${RENKU_DISK:-$DIR/renku-arm64-vm.img}"
 ISO="${RENKU_ISO:-$DIR/renku-arm64.iso}"
 
 INSTALL=0; HEADLESS=0; FORCE_TCG=0; BRIDGED=0; CLIPBOARD=0

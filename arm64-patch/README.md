@@ -71,7 +71,7 @@ in the image rather than worked around in it:
 | Patch | What was wrong |
 | --- | --- |
 | `0005-arm64-pl031-rtc` | The clock started at 1970 on every boot (the PL031 was never read), so no TLS certificate was valid. Taken from haiku-rwebpositive-arm64 and adapted. It used to also add PSCI reboot and power-off; RenkuOS/Source has had that since 024aeb68a7, so that half was dropped. Regenerated once since, when upstream's `2fe0ded501` added an unrelated field (`cacheable_memory_range`) to the same struct right where this patch's own `pl031_rtc` field went -- same change, new context, `pl031_rtc` now sits just ahead of it instead. |
-| `0006-arm64-rchromium-fixes` | R Chromium needs kernel and runtime_loader fixes that only a separate system package carried, and that package has no media stack. They are now in this image's own `haiku` package, which provides `haiku_rchromium_fixes`. |
+| `0006-arm64-rchromium-fixes` | R Chromium needs kernel and runtime_loader fixes that only a separate system package carried, and that package has no media stack. They are now in this image's own `haiku` package, which provides `haiku_rchromium_fixes`. The TLS descriptor resolver preserves all required SIMD bits, and per-relocation arguments are released with the image. |
 | `0007-app-server-layer-text` | From haiku-rwebpositive-arm64: text bounds in app_server layers. It used to also fix the page table query in VMSAv8TranslationMap::Query; RenkuOS/Source has had that since b71ca76473, so that half was dropped. |
 | `0008-minimum-image-certs-and-repos` | No root certificates; a HaikuPorts config for a repository that does not exist on arm64; and Haiku's own repository, whose newer `haiku` package would replace this patched one on `pkgman update`. Now: certificates, and the RENKU Apps repository preconfigured instead. |
 | `0009-arm64-zstd-feature` | packagefs could not read zstd packages, which is every HaikuPorts package (the certificates included). Needs the three packages in `packages/`. |
@@ -110,9 +110,17 @@ cp packages/*.hpkg /path/to/generated.arm64/download/
 
 ## Verified
 
-Re-derived against RenkuOS/Source commit
+The build script now pins RenkuOS/Source commit
+[`8484655099aae479b59590d098dfcbf6fdc4d908`](https://github.com/RenkuOS/Source/commit/8484655099aae479b59590d098dfcbf6fdc4d908)
+(2026-11-06). It is 2 commits beyond the previous pin; those commits only
+change `cpu_deep_idle` code in `headers/private/kernel/cpu.h` and
+`src/system/kernel/cpu.cpp`, outside the patch set. All 19 patches apply to
+a clean checkout of this pin. The ISO build and boot have not yet been
+repeated on this newer pin.
+
+Previously re-derived against RenkuOS/Source commit
 [`4e5de412da344adf76bb2fa5bb68c8b970e961a3`](https://github.com/RenkuOS/Source/commit/4e5de412da344adf76bb2fa5bb68c8b970e961a3)
-(2026-11-06), which `build-renku-arm64-iso.sh` checks out by default. 154
+(2026-11-06). 154
 commits had landed on top of the previous pin; two touched a file one of
 these patches also touches. `0018-tcp-spawn-unbound` turned out to be
 upstream already -- `96d06c2e46` ("tcp: _Spawn() resets local address") is
@@ -122,7 +130,7 @@ unrelated commit (`2fe0ded501`, cacheable memory ranges for ACPI) adds its
 own new field to `arch_kernel_args` at the exact point this patch's own
 `pl031_rtc` field used to go, so the old diff's context no longer matched;
 the field now sits just ahead of it instead, same struct, same semantics.
-On a clean checkout of the new pin all 19 remaining patches apply,
+On a clean checkout of that pin all 19 remaining patches apply,
 `@minimum-anyboot` builds, and
 
 Re-derived once before that, against RenkuOS/Source commit

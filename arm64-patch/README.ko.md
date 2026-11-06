@@ -69,7 +69,7 @@ Launching x-vnd.haiku-media_server failed: No such file or directory
 | 패치 | 무엇이 잘못돼 있었나 |
 | --- | --- |
 | `0005-arm64-pl031-rtc` | 매 부팅마다 시계가 1970년에서 시작해(PL031을 읽지 않음) 어떤 TLS 인증서도 유효하지 않았습니다. haiku-rwebpositive-arm64에서 가져와 맞췄습니다. 예전에는 PSCI 재부팅/전원 끄기도 넣었지만, RenkuOS/Source에 024aeb68a7부터 들어 있어 그 부분은 뺐습니다. 그 뒤 한 번 더 다시 만들었는데, 업스트림의 `2fe0ded501`이 같은 구조체의 똑같은 자리에 관련 없는 필드(`cacheable_memory_range`)를 추가했기 때문입니다 -- 같은 수정, 새 맥락일 뿐, `pl031_rtc`가 이제 그 바로 앞자리에 들어갑니다. |
-| `0006-arm64-rchromium-fixes` | R Chromium에 필요한 커널·runtime_loader 수정이 별도 시스템 패키지에만 있었고, 그 패키지에는 미디어 스택이 없었습니다. 이제 이 이미지의 `haiku` 패키지에 들어 있고 `haiku_rchromium_fixes`를 제공합니다. |
+| `0006-arm64-rchromium-fixes` | R Chromium에 필요한 커널·runtime_loader 수정이 별도 시스템 패키지에만 있었고, 그 패키지에는 미디어 스택이 없었습니다. 이제 이 이미지의 `haiku` 패키지에 들어 있고 `haiku_rchromium_fixes`를 제공합니다. TLS descriptor resolver는 ABI에 필요한 SIMD 전체 상태를 보존하고, relocation 인자는 이미지 언로드 때 해제됩니다. |
 | `0007-app-server-layer-text` | haiku-rwebpositive-arm64의 수정: app_server 레이어 안 텍스트 경계. 예전에는 VMSAv8TranslationMap::Query의 페이지 테이블 조회 수정도 넣었지만, RenkuOS/Source에 b71ca76473부터 들어 있어 그 부분은 뺐습니다. |
 | `0008-minimum-image-certs-and-repos` | 루트 인증서가 없었고, arm64에 존재하지 않는 HaikuPorts 저장소 설정이 있었으며, Haiku 자체 저장소의 더 새 `haiku` 패키지가 `pkgman update` 때 이 패치된 패키지를 덮어쓰게 돼 있었습니다. 이제 인증서가 들어가고 대신 RENKU Apps 저장소가 미리 설정됩니다. |
 | `0009-arm64-zstd-feature` | packagefs가 zstd 패키지를 읽지 못했습니다. HaikuPorts 패키지 전부(인증서 포함)가 zstd입니다. `packages/`의 세 패키지가 필요합니다. |
@@ -107,10 +107,17 @@ cp packages/*.hpkg /path/to/generated.arm64/download/
 
 ## 확인
 
-RenkuOS/Source의 커밋
+빌드 스크립트는 이제 RenkuOS/Source의 커밋
+[`8484655099aae479b59590d098dfcbf6fdc4d908`](https://github.com/RenkuOS/Source/commit/8484655099aae479b59590d098dfcbf6fdc4d908)
+(2026-11-06)을 고정합니다. 이전 고정 커밋보다 2개 커밋 앞서며,
+두 커밋 모두 패치셋 바깥의 `cpu_deep_idle` 코드
+(`headers/private/kernel/cpu.h`, `src/system/kernel/cpu.cpp`)만 변경합니다.
+이 커밋을 깨끗하게 체크아웃했을 때 19개 패치가 모두 적용됩니다.
+다만 이 최신 고정 커밋으로 ISO 빌드와 부팅까지 다시 검증하지는 않았습니다.
+
+이전에는 RenkuOS/Source의 커밋
 [`4e5de412da344adf76bb2fa5bb68c8b970e961a3`](https://github.com/RenkuOS/Source/commit/4e5de412da344adf76bb2fa5bb68c8b970e961a3)
-(2026-11-06)에 맞춰 다시 뽑았습니다. `build-renku-arm64-iso.sh`가 기본으로
-체크아웃하는 커밋입니다. 이전 고정 커밋 이후 154개 커밋이 올라왔고, 그중
+(2026-11-06)에 맞춰 패치를 다시 뽑았습니다. 이전 고정 커밋 이후 154개 커밋이 올라왔고, 그중
 둘이 이 패치들 중 하나가 건드리는 파일을 같이 건드렸습니다. `0018-tcp-spawn-unbound`는
 알고 보니 업스트림에 이미 들어가 있었습니다 -- `96d06c2e46`("tcp: _Spawn()
 resets local address", 메인라인 Haiku에서 체리픽)가 똑같은 수정이라, 그
@@ -119,7 +126,7 @@ resets local address", 메인라인 Haiku에서 체리픽)가 똑같은 수정�
 `arch_kernel_args`에 자기 필드를 추가했는데, 하필 이 패치의 `pl031_rtc`
 필드가 들어가던 바로 그 자리라 기존 diff의 맥락이 더는 맞지 않았습니다.
 이제 그 필드는 바로 그 앞자리에 들어갑니다 -- 같은 구조체, 같은 의미는
-그대로입니다. 이 새 고정 커밋을 깨끗하게 받아 남은 19개 패치를 모두
+그대로입니다. 그 고정 커밋을 깨끗하게 받아 남은 19개 패치를 모두
 적용하고 `@minimum-anyboot`를 빌드했고, 그 ISO를 QEMU(`hvf`, `virtio-gpu-pci`,
 `intel-hda`)에 유일한 USB 디스크로 붙여 데스크톱까지 부팅했습니다. PL031
 시계가 실제 날짜를 읽고, `hda` 드라이버가 올라와 스트림이 설정되고,

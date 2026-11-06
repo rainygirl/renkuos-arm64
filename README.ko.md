@@ -38,6 +38,12 @@ arm64 포팅 자체를 패치하는 건 없습니다. 이 디렉터리가 더하
 - Docker Desktop, Settings > General > "Use Virtualization Framework" 켜기
 - `brew install qemu`
 
+## 현재 ISO
+
+RenkuOS/Source 커밋 `8484655099aae479b59590d098dfcbf6fdc4d908`에서 빌드한
+`renku-arm64.iso`의 SHA-256은
+`a17e71567b58539af254746c6c3fad4df79331d9cb0ff183bfc50de114c06168`입니다.
+
 ## ISO 빌드
 
 ```sh

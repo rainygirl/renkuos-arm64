@@ -10,11 +10,27 @@ away. These are the same fixes, made part of this image's own haiku package:
   (haiku-rchromium-arm64 haiku_kernel_patches/K0001).
 - runtime_loader: TLS descriptor relocations on arm64, and no x86_gcc2 /
   x86 library subdirectory lookup on architectures that cannot have one
-  (haiku_kernel_patches/A0001).
+  (haiku_kernel_patches/A0001). The TLSDESC resolver preserves the full
+  SIMD state required by the ABI, including the upper halves of q8-q15;
+  resolver arguments live with the image and are freed when it unloads.
 - The arm64 haiku package provides haiku_rchromium_fixes=1.
 
+diff --git a/headers/private/runtime_loader/runtime_loader.h b/headers/private/runtime_loader/runtime_loader.h
+index 39785ed1..d6eb3563 100644
+--- a/headers/private/runtime_loader/runtime_loader.h
++++ b/headers/private/runtime_loader/runtime_loader.h
+@@ -98,6 +98,9 @@ typedef struct image_t {
+ 	struct image_t		*prev;
+ 	int32				ref_count;
+ 	uint32				flags;
++	// Architecture-specific relocation data owned by the image. The
++	// runtime loader releases this allocation when the image is destroyed.
++	void*				arch_relocation_data;
+ 
+ 	uint32				api_version;
+ 	uint32				abi;
 diff --git a/src/data/package_infos/generic/haiku b/src/data/package_infos/generic/haiku
-index b2e36c350f..8e997950ec 100644
+index b2e36c35..8e997950 100644
 --- a/src/data/package_infos/generic/haiku
 +++ b/src/data/package_infos/generic/haiku
 @@ -23,6 +23,12 @@ provides {
@@ -31,7 +47,7 @@ index b2e36c350f..8e997950ec 100644
  	cmd:arp
  	cmd:chop
 diff --git a/src/system/kernel/vm/vm.cpp b/src/system/kernel/vm/vm.cpp
-index b9bfb0c44a..bb06d3d844 100644
+index b9bfb0c4..bb06d3d8 100644
 --- a/src/system/kernel/vm/vm.cpp
 +++ b/src/system/kernel/vm/vm.cpp
 @@ -5194,8 +5194,19 @@ lock_memory_etc(team_id team, void* address, size_t numBytes, uint32 flags)
@@ -56,7 +72,7 @@ index b9bfb0c44a..bb06d3d844 100644
  			break;
  		}
 diff --git a/src/system/runtime_loader/arch/arm64/Jamfile b/src/system/runtime_loader/arch/arm64/Jamfile
-index 686c19f095..0746f147df 100644
+index 686c19f0..0746f147 100644
 --- a/src/system/runtime_loader/arch/arm64/Jamfile
 +++ b/src/system/runtime_loader/arch/arm64/Jamfile
 @@ -14,6 +14,7 @@ for architectureObject in [ MultiArchSubDirSetup arm64 ] {
@@ -68,7 +84,7 @@ index 686c19f095..0746f147df 100644
  			<src!system!libroot!os!arch!$(TARGET_ARCH)!$(architecture)>thread.o
  			<$(architecture)>posix_string_arch_$(TARGET_ARCH).o
 diff --git a/src/system/runtime_loader/arch/arm64/arch_relocate.cpp b/src/system/runtime_loader/arch/arm64/arch_relocate.cpp
-index 24fd7bbd84..5879a7dfe0 100644
+index 24fd7bbd..ba3a9f50 100644
 --- a/src/system/runtime_loader/arch/arm64/arch_relocate.cpp
 +++ b/src/system/runtime_loader/arch/arm64/arch_relocate.cpp
 @@ -8,6 +8,7 @@
@@ -79,7 +95,7 @@ index 24fd7bbd84..5879a7dfe0 100644
  #include "runtime_loader_private.h"
  
  #include <runtime_loader.h>
-@@ -21,6 +22,30 @@
+@@ -21,9 +22,34 @@
  #endif
  
  
@@ -109,8 +125,13 @@ index 24fd7bbd84..5879a7dfe0 100644
 +
  static status_t
  relocate_rela(image_t* rootImage, image_t* image, Elf64_Rela* rel,
- 	size_t relLength, SymbolLookupCache* cache)
-@@ -69,6 +94,26 @@ relocate_rela(image_t* rootImage, image_t* image, Elf64_Rela* rel,
+-	size_t relLength, SymbolLookupCache* cache)
++	size_t relLength, SymbolLookupCache* cache, tlsdesc_arg* tlsdescArgs,
++	size_t* tlsdescArgIndex)
+ {
+ 	for (size_t i = 0; i < relLength / sizeof(Elf64_Rela); i++) {
+ 		int type = ELF64_R_TYPE(rel[i].r_info);
+@@ -69,6 +95,23 @@ relocate_rela(image_t* rootImage, image_t* image, Elf64_Rela* rel,
  			case R_AARCH64_TLS_DTPREL64:
  				relocValue = symAddr;
  				break;
@@ -121,10 +142,7 @@ index 24fd7bbd84..5879a7dfe0 100644
 +				// and local dynamic models on AArch64 and offers no way to ask
 +				// for the older __tls_get_addr sequence, so without it nothing
 +				// built with clang that has a thread_local can be loaded.
-+				struct tlsdesc_arg* arg
-+					= (struct tlsdesc_arg*)malloc(sizeof(struct tlsdesc_arg));
-+				if (arg == NULL)
-+					return B_NO_MEMORY;
++				struct tlsdesc_arg* arg = &tlsdescArgs[(*tlsdescArgIndex)++];
 +				arg->module = symbolImage == NULL
 +					? image->dso_tls_id : symbolImage->dso_tls_id;
 +				arg->offset = symAddr + rel[i].r_addend;
@@ -137,12 +155,70 @@ index 24fd7bbd84..5879a7dfe0 100644
  			default:
  				TRACE(("unhandled relocation type %d\n", type));
  				return B_BAD_DATA;
+@@ -81,18 +124,47 @@ relocate_rela(image_t* rootImage, image_t* image, Elf64_Rela* rel,
+ }
+ 
+ 
++static size_t
++count_tlsdesc_relocations(Elf64_Rela* rel, size_t relLength)
++{
++	size_t count = 0;
++	for (size_t i = 0; i < relLength / sizeof(Elf64_Rela); i++) {
++		if (ELF64_R_TYPE(rel[i].r_info) == R_AARCH64_TLSDESC)
++			count++;
++	}
++	return count;
++}
++
++
+ status_t
+ arch_relocate_image(image_t *rootImage, image_t *image,
+ 	SymbolLookupCache* cache)
+ {
+ 	status_t status;
++	size_t tlsdescCount = 0;
++	if (image->rela != NULL)
++		tlsdescCount += count_tlsdesc_relocations(image->rela,
++			image->rela_len);
++	if (image->pltrel != NULL)
++		tlsdescCount += count_tlsdesc_relocations((Elf64_Rela*)image->pltrel,
++			image->pltrel_len);
++	if (tlsdescCount != 0) {
++		if (tlsdescCount > SIZE_MAX / sizeof(tlsdesc_arg))
++			return B_NO_MEMORY;
++		image->arch_relocation_data = malloc(tlsdescCount
++			* sizeof(tlsdesc_arg));
++		if (image->arch_relocation_data == NULL)
++			return B_NO_MEMORY;
++	}
++	tlsdesc_arg* tlsdescArgs = (tlsdesc_arg*)image->arch_relocation_data;
++	size_t tlsdescArgIndex = 0;
+ 
+ 	// No REL on arm64.
+ 
+ 	// Perform RELA relocations.
+ 	if (image->rela) {
+ 		status = relocate_rela(rootImage, image, image->rela, image->rela_len,
+-			cache);
++			cache, tlsdescArgs, &tlsdescArgIndex);
+ 		if (status != B_OK)
+ 			return status;
+ 	}
+@@ -100,7 +172,7 @@ arch_relocate_image(image_t *rootImage, image_t *image,
+ 	// PLT relocations (they are RELA on arm64).
+ 	if (image->pltrel) {
+ 		status = relocate_rela(rootImage, image, (Elf64_Rela*)image->pltrel,
+-			image->pltrel_len, cache);
++			image->pltrel_len, cache, tlsdescArgs, &tlsdescArgIndex);
+ 		if (status != B_OK)
+ 			return status;
+ 	}
 diff --git a/src/system/runtime_loader/arch/arm64/arch_tlsdesc.S b/src/system/runtime_loader/arch/arm64/arch_tlsdesc.S
 new file mode 100644
-index 0000000000..4b01ce0743
+index 00000000..0779afbd
 --- /dev/null
 +++ b/src/system/runtime_loader/arch/arm64/arch_tlsdesc.S
-@@ -0,0 +1,107 @@
+@@ -0,0 +1,114 @@
 +/*
 + * Copyright 2026, Haiku, Inc. All Rights Reserved.
 + * Distributed under the terms of the MIT License.
@@ -168,11 +244,11 @@ index 0000000000..4b01ce0743
 +
 +	Haiku allocates a thread's TLS blocks lazily, so the answer is not known
 +	until the first access and this has to call into C. The calling
-+	convention here is not the ordinary one: everything except x0 has to come
-+	back unchanged, because the compiler assumed only x0 would be touched.
-+	The C function it calls preserves the callee-saved registers on its own,
-+	so what has to be saved here is the caller-saved set: x1-x18, the link
-+	register, and the vector registers a C function may use.
++	convention here is not the ordinary one: the resolver must preserve every
++	general-purpose and SIMD register it modifies except x0, x1 and x30. The C
++	function it calls preserves x19-x29 and the low 64 bits of q8-q15, but may
++	modify the upper halves of q8-q15, so the resolver saves and restores all
++	of q8-q15 itself as well as the caller-saved registers.
 +
 +	tpidr_el0 on Haiku addresses the TLS slot array rather than an ELF thread
 +	pointer, but that does not matter: the caller computes tpidr_el0 + result,
@@ -200,13 +276,16 @@ index 0000000000..4b01ce0743
 +	stp		x15, x16, [sp, #-16]!
 +	stp		x17, x18, [sp, #-16]!
 +
-+	// Caller-saved vector registers. q8-q15 are callee-saved in their low
-+	// 64 bits only, but a C function that touches them saves them itself,
-+	// so q0-q7 and q16-q31 are what is left to preserve here.
++	// Preserve the SIMD registers. Ordinary C callees only preserve the low
++	// 64 bits of q8-q15; the TLSDESC resolver contract requires both halves.
 +	stp		q0, q1, [sp, #-32]!
 +	stp		q2, q3, [sp, #-32]!
 +	stp		q4, q5, [sp, #-32]!
 +	stp		q6, q7, [sp, #-32]!
++	stp		q8, q9, [sp, #-32]!
++	stp		q10, q11, [sp, #-32]!
++	stp		q12, q13, [sp, #-32]!
++	stp		q14, q15, [sp, #-32]!
 +	stp		q16, q17, [sp, #-32]!
 +	stp		q18, q19, [sp, #-32]!
 +	stp		q20, q21, [sp, #-32]!
@@ -233,6 +312,10 @@ index 0000000000..4b01ce0743
 +	ldp		q20, q21, [sp], #32
 +	ldp		q18, q19, [sp], #32
 +	ldp		q16, q17, [sp], #32
++	ldp		q14, q15, [sp], #32
++	ldp		q12, q13, [sp], #32
++	ldp		q10, q11, [sp], #32
++	ldp		q8, q9, [sp], #32
 +	ldp		q6, q7, [sp], #32
 +	ldp		q4, q5, [sp], #32
 +	ldp		q2, q3, [sp], #32
@@ -251,7 +334,7 @@ index 0000000000..4b01ce0743
 +	ldp		x29, x30, [sp], #16
 +	ret
 diff --git a/src/system/runtime_loader/elf_haiku_version.cpp b/src/system/runtime_loader/elf_haiku_version.cpp
-index 627f0b129a..76b2dff64d 100644
+index 627f0b12..76b2dff6 100644
 --- a/src/system/runtime_loader/elf_haiku_version.cpp
 +++ b/src/system/runtime_loader/elf_haiku_version.cpp
 @@ -247,8 +247,26 @@ analyze_image_haiku_version_and_abi(int fd, image_t* image, elf_ehdr& eheader,
@@ -282,7 +365,7 @@ index 627f0b129a..76b2dff64d 100644
  	}
  
 diff --git a/src/system/runtime_loader/elf_load_image.cpp b/src/system/runtime_loader/elf_load_image.cpp
-index 48d587d345..f144372da7 100644
+index 48d587d3..f144372d 100644
 --- a/src/system/runtime_loader/elf_load_image.cpp
 +++ b/src/system/runtime_loader/elf_load_image.cpp
 @@ -640,7 +640,10 @@ load_image(char const* name, image_type type, const char* rpath, const char* run
@@ -305,3 +388,15 @@ index 48d587d345..f144372da7 100644
  
  	// init gcc version dependent image flags
  	// symbol resolution strategy
+diff --git a/src/system/runtime_loader/images.cpp b/src/system/runtime_loader/images.cpp
+index 2097cf42..09244d69 100644
+--- a/src/system/runtime_loader/images.cpp
++++ b/src/system/runtime_loader/images.cpp
+@@ -237,6 +237,7 @@ delete_image_struct(image_t* image)
+ #endif
+ 	free(image->needed);
+ 	free(image->versions);
++	free(image->arch_relocation_data);
+ 
+ 	while (RuntimeLoaderSymbolPatcher* patcher
+ 			= image->defined_symbol_patchers) {
