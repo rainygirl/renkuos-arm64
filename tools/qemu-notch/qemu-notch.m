@@ -1,83 +1,196 @@
 // Let QEMU's cocoa display cover the whole screen in full screen, including
-// the strip either side of a MacBook's camera notch.
+// the strip either side of a MacBook's camera notch, while staying a normal
+// macOS full-screen window: its own Space, with Cmd-Tab, Mission Control and
+// three-finger swipes reaching other apps.
 //
 // QEMU 10's ui/cocoa.m uses macOS native full screen
-// (-[NSWindow toggleFullScreen:]), and macOS places a native full-screen
-// window below the camera housing whatever the app asks for: measured with
-// CGWindowListCopyWindowInfo on a 1470x956 pt screen, QEMU's window sat at
-// y=33 with a height of 923, also when QEMU was made to ask for the whole
-// frame. So this replaces native full screen in the QEMU process with the
-// older kind: the same window, made borderless, raised above the menu bar,
-// with the menu bar and Dock hidden, and given the screen's whole frame.
-// QEMU's own windowDidResize: then tells the guest the new size, and a guest
-// that follows it (RenkuOS's virtio_gpu does) fills the screen 1:1.
+// (-[NSWindow toggleFullScreen:]), and macOS keeps a native full-screen
+// window below the camera housing: 1470x923 of a 1470x956 pt screen, whatever
+// the window asks for (-setFrame: after entering, -constrainFrameRect:toScreen:
+// and a full-size content view were all tried and ignored). A borderless
+// window over the menu bar does cover the housing, but is not full screen:
+// no Space of its own, and other apps cannot be brought in front of it.
 //
-// Loaded with DYLD_INSERT_LIBRARIES. Cmd-F (QEMU's "Enter Fullscreen") and
-// -display cocoa,full-screen=on both go through toggleFullScreen:, so both
-// get this; pressing Cmd-F again restores the window.
+// What does both: a window with NSWindowCollectionBehaviorFullScreenAuxiliary
+// lives in the full-screen window's Space and may cover the whole screen. So
+// once QEMU's window has entered full screen, its view (QemuCocoaView) moves
+// into such a borderless window, made the size of the screen; before full
+// screen ends it moves back. The full-screen window itself stays underneath
+// and keeps the Space. Everything QEMU learnt from its window delegate is
+// forwarded: a resize updates the guest's bounds and size, losing key focus
+// releases keys and the mouse, and Cmd-F still leaves full screen.
+//
+// What the guest is offered: QEMU proposes the view's size in points, and
+// R Retina's rretina_resize multiplies it by host_scale (2 at 200%), which
+// gives 2940x1912 for 1470x956 pt -- macOS's scaled backing store, not the
+// panel. With QEMU_NOTCH_PANEL=<w>x<h> (the panel's pixels;
+// run-qemu-renku-arm64.sh sets it), full screen proposes the panel divided by
+// the backing scale instead -- 1280x832 for 2560x1664 -- so the guest at 200%
+// runs at exactly the panel's resolution.
+//
+// Loaded with DYLD_INSERT_LIBRARIES.
 #import <Cocoa/Cocoa.h>
 #import <objc/runtime.h>
 
-static char kSavedKey;
-
-@interface QNSavedState : NSObject
-@property NSRect frame;
-@property NSWindowStyleMask style;
-@property NSWindowLevel level;
-@property NSApplicationPresentationOptions options;
+@interface QNOverlay : NSWindow
+@property(weak) NSWindow* fullScreenWindow;
 @end
-@implementation QNSavedState
+@implementation QNOverlay
+- (BOOL)canBecomeKeyWindow { return YES; }
+- (BOOL)canBecomeMainWindow { return YES; }
+// Cmd-F calls [[cocoaView window] toggleFullScreen:].
+- (void)toggleFullScreen:(id)sender { [self.fullScreenWindow toggleFullScreen:sender]; }
 @end
 
-static void Enter(NSWindow* window) {
-    QNSavedState* saved = [QNSavedState new];
-    saved.frame = window.frame;
-    saved.style = window.styleMask;
-    saved.level = window.level;
-    saved.options = NSApp.presentationOptions;
-    objc_setAssociatedObject(window, &kSavedKey, saved, OBJC_ASSOCIATION_RETAIN);
+static IMP gSetContentSize, gSetContentAspectRatio, gUpdateUIInfoLocked, gViewFrame;
+static NSSize gPanel;
+static int gInUIInfo;
+static QNOverlay* gOverlay;
+static NSView* gView;
 
+static BOOL IsOverlay(NSWindow* window) {
+    return window != nil && window == gOverlay;
+}
+
+static NSRect ScreenFrame(NSWindow* window) {
     NSScreen* screen = window.screen ?: [NSScreen mainScreen];
-    NSApp.presentationOptions = NSApplicationPresentationHideDock |
-                                NSApplicationPresentationHideMenuBar;
-    // Resizable stays set: QEMU's resizeWindow keeps the window's size only
-    // for a resizable window, and sets it to the guest's pixel size otherwise.
-    window.styleMask = NSWindowStyleMaskBorderless | NSWindowStyleMaskResizable;
-    window.level = NSMainMenuWindowLevel + 1;
-    window.hasShadow = NO;
-    [window setContentAspectRatio:NSZeroSize];
-    [window setFrame:screen.frame display:YES];
-    [window makeKeyAndOrderFront:nil];
+    return screen.frame;
 }
 
-static void Leave(NSWindow* window, QNSavedState* saved) {
-    objc_setAssociatedObject(window, &kSavedKey, nil, OBJC_ASSOCIATION_RETAIN);
-    window.styleMask = saved.style;
-    window.level = saved.level;
-    window.hasShadow = YES;
-    NSApp.presentationOptions = saved.options;
-    [window setFrame:saved.frame display:YES];
+// QEMU's resizeWindow runs on every guest mode change and sizes the window to
+// the guest; the overlay stays the size of the screen and the view scales.
+static void SetContentSize(NSWindow* self, SEL _cmd, NSSize size) {
+    if (IsOverlay(self)) {
+        [self setFrame:ScreenFrame(self) display:YES];
+        return;
+    }
+    ((void (*)(id, SEL, NSSize))gSetContentSize)(self, _cmd, size);
 }
 
-static void ToggleFullScreen(NSWindow* self, SEL _cmd, id sender) {
-    QNSavedState* saved = objc_getAssociatedObject(self, &kSavedKey);
-    if (saved != nil)
-        Leave(self, saved);
-    else
-        Enter(self);
+static void SetContentAspectRatio(NSWindow* self, SEL _cmd, NSSize ratio) {
+    if (IsOverlay(self))
+        ratio = NSZeroSize;
+    ((void (*)(id, SEL, NSSize))gSetContentAspectRatio)(self, _cmd, ratio);
 }
 
-// A borderless window cannot become key by default, and QEMU needs key
-// events.
-static BOOL CanBecomeKey(NSWindow* self, SEL _cmd) {
-    return YES;
+static void UpdateUIInfoLocked(NSView* self, SEL _cmd) {
+    gInUIInfo++;
+    ((void (*)(id, SEL))gUpdateUIInfoLocked)(self, _cmd);
+    gInUIInfo--;
+}
+
+// Only while updateUIInfoLocked runs, and only in the overlay: drawing, layout
+// and input see the real frame.
+static NSRect ViewFrame(NSView* self, SEL _cmd) {
+    NSRect frame = ((NSRect (*)(id, SEL))gViewFrame)(self, _cmd);
+    NSWindow* window = self.window;
+    if (gInUIInfo > 0 && gPanel.width > 0 && IsOverlay(window)) {
+        CGFloat scale = window.backingScaleFactor > 0 ? window.backingScaleFactor : 2;
+        frame.size = NSMakeSize(gPanel.width / scale, gPanel.height / scale);
+    }
+    return frame;
+}
+
+static void Refresh(NSView* view) {
+    if ([view respondsToSelector:@selector(updateBounds)])
+        [view performSelector:@selector(updateBounds)];
+    if ([view respondsToSelector:@selector(updateUIInfo)])
+        [view performSelector:@selector(updateUIInfo)];
+}
+
+static void EnterOverlay(NSWindow* full) {
+    NSView* view = full.contentView;
+    if (gOverlay != nil || view == nil || ![view isKindOfClass:objc_getClass("QemuCocoaView")])
+        return;
+    NSRect frame = ScreenFrame(full);
+    QNOverlay* overlay = [[QNOverlay alloc]
+        initWithContentRect:frame
+                  styleMask:NSWindowStyleMaskBorderless | NSWindowStyleMaskResizable
+                    backing:NSBackingStoreBuffered
+                      defer:NO];
+    overlay.releasedWhenClosed = NO;
+    overlay.fullScreenWindow = full;
+    overlay.collectionBehavior = NSWindowCollectionBehaviorFullScreenAuxiliary;
+    overlay.level = NSMainMenuWindowLevel + 1;
+    overlay.backgroundColor = NSColor.blackColor;
+    overlay.hasShadow = NO;
+    overlay.acceptsMouseMovedEvents = YES;
+    gOverlay = overlay;
+    gView = view;
+
+    NSView* placeholder = [[NSView alloc] initWithFrame:view.frame];
+    full.contentView = placeholder;
+    overlay.contentView = view;
+    [overlay setFrame:frame display:YES];
+    [overlay makeKeyAndOrderFront:nil];
+    [overlay makeFirstResponder:view];
+    Refresh(view);
+}
+
+static void LeaveOverlay(NSWindow* full) {
+    if (gOverlay == nil)
+        return;
+    NSView* view = gView;
+    QNOverlay* overlay = gOverlay;
+    gOverlay = nil;
+    gView = nil;
+    overlay.contentView = [[NSView alloc] initWithFrame:NSZeroRect];
+    [overlay orderOut:nil];
+    full.contentView = view;
+    [full makeKeyAndOrderFront:nil];
+    [full makeFirstResponder:view];
+    Refresh(view);
 }
 
 __attribute__((constructor)) static void Init(void) {
-    method_setImplementation(
-        class_getInstanceMethod([NSWindow class], @selector(toggleFullScreen:)),
-        (IMP)ToggleFullScreen);
-    method_setImplementation(
-        class_getInstanceMethod([NSWindow class], @selector(canBecomeKeyWindow)),
-        (IMP)CanBecomeKey);
+    Class window = [NSWindow class];
+    gSetContentSize = method_setImplementation(
+        class_getInstanceMethod(window, @selector(setContentSize:)),
+        (IMP)SetContentSize);
+    gSetContentAspectRatio = method_setImplementation(
+        class_getInstanceMethod(window, @selector(setContentAspectRatio:)),
+        (IMP)SetContentAspectRatio);
+
+    const char* panel = getenv("QEMU_NOTCH_PANEL");
+    int w = 0, h = 0;
+    if (panel != NULL && sscanf(panel, "%dx%d", &w, &h) == 2 && w > 0 && h > 0)
+        gPanel = NSMakeSize(w, h);
+
+    Class view = objc_getClass("QemuCocoaView");
+    Method update = view ? class_getInstanceMethod(view, @selector(updateUIInfoLocked)) : NULL;
+    if (update != NULL) {
+        gUpdateUIInfoLocked = method_setImplementation(update, (IMP)UpdateUIInfoLocked);
+        // An override on QemuCocoaView alone, not on every NSView.
+        Method frame = class_getInstanceMethod([NSView class], @selector(frame));
+        gViewFrame = method_getImplementation(frame);
+        class_addMethod(view, @selector(frame), (IMP)ViewFrame, method_getTypeEncoding(frame));
+    } else {
+        fprintf(stderr, "qemu-notch: no -[QemuCocoaView updateUIInfoLocked]\n");
+    }
+
+    NSNotificationCenter* center = [NSNotificationCenter defaultCenter];
+    [center addObserverForName:NSWindowDidEnterFullScreenNotification object:nil queue:nil
+                    usingBlock:^(NSNotification* note) { EnterOverlay(note.object); }];
+    [center addObserverForName:NSWindowWillExitFullScreenNotification object:nil queue:nil
+                    usingBlock:^(NSNotification* note) { LeaveOverlay(note.object); }];
+    [center addObserverForName:NSWindowDidResizeNotification object:nil queue:nil
+                    usingBlock:^(NSNotification* note) {
+                        if (IsOverlay(note.object)) Refresh(gView);
+                    }];
+    // QEMU releases held keys and the mouse grab when its window loses focus.
+    [center addObserverForName:NSWindowDidResignKeyNotification object:nil queue:nil
+                    usingBlock:^(NSNotification* note) {
+                        if (!IsOverlay(note.object)) return;
+                        id<NSWindowDelegate> delegate = gOverlay.fullScreenWindow.delegate;
+                        if ([delegate respondsToSelector:@selector(windowDidResignKey:)])
+                            [delegate windowDidResignKey:note];
+                    }];
+    // Coming back to the Space activates the full-screen window; hand focus on.
+    [center addObserverForName:NSWindowDidBecomeKeyNotification object:nil queue:nil
+                    usingBlock:^(NSNotification* note) {
+                        if (gOverlay != nil && note.object == gOverlay.fullScreenWindow)
+                            [gOverlay makeKeyAndOrderFront:nil];
+                    }];
+    if (gPanel.width > 0)
+        fprintf(stderr, "qemu-notch: full screen proposes %dx%d pixels\n", w, h);
 }

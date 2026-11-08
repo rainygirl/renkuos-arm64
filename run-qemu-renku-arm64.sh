@@ -187,7 +187,7 @@ else
 		NOTCH="$DIR/tools/qemu-notch/libqemu-notch.dylib"
 		[ -f "$NOTCH" ] || "$DIR/tools/qemu-notch/build.sh" >/dev/null \
 			|| echo "could not build $NOTCH -- full screen will stop below the notch" >&2
-		[ -f "$NOTCH" ] && ENV_ARGS=(env DYLD_INSERT_LIBRARIES="$NOTCH")
+		[ -f "$NOTCH" ] && ENV_ARGS=(env DYLD_INSERT_LIBRARIES="$NOTCH" QEMU_NOTCH_PANEL="$RES")
 	fi
 fi
 
