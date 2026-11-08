@@ -95,6 +95,14 @@ After that, `./run-qemu-renku-arm64.sh` (no `--install`) boots the installed
 disk directly. `--headless` drops the window (serial console only); the
 disk (`renku-arm64-vm.img`) persists between runs either way.
 
+`--fullscreen` starts full screen (Cmd-F toggles it). Full screen covers the
+whole display, the strip beside a MacBook's camera notch included: macOS keeps
+QEMU's own full screen below the notch, so the script injects
+`tools/qemu-notch/libqemu-notch.dylib` (built on first run), which uses a
+borderless window over the menu bar instead. The guest's screen matches the
+Mac's main display (`RENKU_RES=WxH` to override; `RENKU_NOTCH=0` to turn the
+dylib off).
+
 ## SSH
 
 `sshd` starts at boot. The script already forwards a host port to it:

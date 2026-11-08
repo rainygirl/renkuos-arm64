@@ -12,6 +12,7 @@
 #                                       (see "Bridged networking" below)
 #   ./run-qemu-renku-arm64.sh --clipboard    sync the Mac's clipboard with
 #                                       the guest's (see "Clipboard sync")
+#   ./run-qemu-renku-arm64.sh --fullscreen   start full screen (Cmd-F toggles)
 #
 # The disk (renku-arm64-vm.img, created empty on first run) persists between
 # runs. The installer medium is renku-arm64.iso, built by
@@ -59,6 +60,16 @@
 #   The guest's bridged IP is DHCP-assigned and not predictable from the
 #   host side -- check it in the guest's own Network preferences after boot.
 #
+# Full screen and the notch:
+#   macOS keeps a native full-screen window below a MacBook's camera notch,
+#   which left a black strip across the top of the guest. The cocoa display
+#   is therefore run with tools/qemu-notch/libqemu-notch.dylib injected
+#   (built on first use), which turns QEMU's full screen into a borderless
+#   window over the whole screen, the strip beside the notch included. The
+#   guest's screen defaults to the Mac's main display resolution (2560x1664
+#   on a 13" MacBook Air) so it fills that 1:1; RENKU_RES=WxH overrides it,
+#   RENKU_NOTCH=0 leaves QEMU's own full screen alone.
+#
 # Clipboard sync (--clipboard):
 #   QEMU's cocoa display has no clipboard support at all (no suboption for
 #   it, unlike its GTK/SPICE backends) -- confirmed against `qemu -help`'s
@@ -80,7 +91,7 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DISK="${RENKU_DISK:-$DIR/renku-arm64-vm.img}"
 ISO="${RENKU_ISO:-$DIR/renku-arm64.iso}"
 
-INSTALL=0; HEADLESS=0; FORCE_TCG=0; BRIDGED=0; CLIPBOARD=0
+INSTALL=0; HEADLESS=0; FORCE_TCG=0; BRIDGED=0; CLIPBOARD=0; FULLSCREEN=0
 for a in "$@"; do
 	case "$a" in
 		--install)   INSTALL=1 ;;
@@ -88,6 +99,7 @@ for a in "$@"; do
 		--tcg)       FORCE_TCG=1 ;;
 		--bridged)   BRIDGED=1 ;;
 		--clipboard) CLIPBOARD=1 ;;
+		--fullscreen) FULLSCREEN=1 ;;
 		*) echo "unknown option: $a" >&2; exit 1 ;;
 	esac
 done
@@ -155,10 +167,28 @@ else
 	       -device usb-storage,bus=usb.0,drive=drv0)
 fi
 
+# The guest's screen: the Mac's main display, in pixels, unless overridden.
+RES="${RENKU_RES:-$(system_profiler SPDisplaysDataType 2>/dev/null \
+	| awk '/Resolution:/ { print $2 "x" $4; exit }')}"
+case "$RES" in
+	[0-9]*x[0-9]*) ;;
+	*) RES=2560x1600 ;;
+esac
+GPU=(-device virtio-gpu-pci,xres="${RES%x*}",yres="${RES#*x}")
+
+ENV_ARGS=()
 if [ "$HEADLESS" = "1" ]; then
-	DISPLAY_ARGS=(-display none -device virtio-gpu-pci,xres=2560,yres=1600 -serial file:"$SERIAL")
+	DISPLAY_ARGS=(-display none "${GPU[@]}" -serial file:"$SERIAL")
 else
-	DISPLAY_ARGS=(-display cocoa,zoom-to-fit=on -device virtio-gpu-pci,xres=2560,yres=1600 -serial file:"$SERIAL")
+	COCOA=cocoa,zoom-to-fit=on
+	[ "$FULLSCREEN" = "1" ] && COCOA="$COCOA,full-screen=on"
+	DISPLAY_ARGS=(-display "$COCOA" "${GPU[@]}" -serial file:"$SERIAL")
+	if [ "${RENKU_NOTCH:-1}" = "1" ]; then
+		NOTCH="$DIR/tools/qemu-notch/libqemu-notch.dylib"
+		[ -f "$NOTCH" ] || "$DIR/tools/qemu-notch/build.sh" >/dev/null \
+			|| echo "could not build $NOTCH -- full screen will stop below the notch" >&2
+		[ -f "$NOTCH" ] && ENV_ARGS=(env DYLD_INSERT_LIBRARIES="$NOTCH")
+	fi
 fi
 
 rm -f "$QMP"
@@ -166,6 +196,7 @@ echo "disk:     $DISK"
 echo "accel:    $ACCEL   cpu: $CPU"
 echo "serial:   $SERIAL"
 echo "qmp:      $QMP"
+echo "screen:   $RES"
 
 QEMU_BIN="$(command -v qemu-system-aarch64)"
 [ -n "$QEMU_BIN" ] || { echo "qemu-system-aarch64 not found in PATH" >&2; exit 1; }
@@ -188,7 +219,7 @@ QEMU_ARGS=(
 # Every other mode keeps using exec -- nothing to clean up, and it passes
 # signals straight through to qemu instead of via a bash wrapper.
 if [ "$CLIPBOARD" = "0" ]; then
-	exec "${RUNNER[@]+"${RUNNER[@]}"}" "$QEMU_BIN" "${QEMU_ARGS[@]}"
+	exec "${RUNNER[@]+"${RUNNER[@]}"}" "${ENV_ARGS[@]+"${ENV_ARGS[@]}"}" "$QEMU_BIN" "${QEMU_ARGS[@]}"
 fi
 
 clipboard_sync_loop() {
@@ -241,4 +272,4 @@ cleanup_clipboard() {
 trap cleanup_clipboard EXIT
 echo "clipboard: syncing with the Mac (ssh key: ${RENKU_SSH_KEY:-$HOME/.ssh/id_ed25519})"
 
-"${RUNNER[@]+"${RUNNER[@]}"}" "$QEMU_BIN" "${QEMU_ARGS[@]}"
+"${RUNNER[@]+"${RUNNER[@]}"}" "${ENV_ARGS[@]+"${ENV_ARGS[@]}"}" "$QEMU_BIN" "${QEMU_ARGS[@]}"
