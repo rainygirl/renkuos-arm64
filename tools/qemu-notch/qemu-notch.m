@@ -28,9 +28,22 @@
 // size at host_scale 1 (UI scale Automatic), and app_server picks the UI
 // scale from the EDID's pixel density.
 //
+// app_server picks that scale once, when it starts, and the guest reaches it
+// in a few seconds - sooner than a QEMU started from a background shell gets
+// into full screen, if it does at all (macOS ignores the full-screen request
+// of an app that is not active). That boot saw the first, 640x416 pt window:
+// a 13x8 cm display, 516 dpi, the largest UI scale. With
+// QEMU_NOTCH_QMP=<qmp socket> (QEMU started with -S) the guest is held until
+// full screen has proposed the panel's size, then started with QMP "cont" --
+// or after 30 s regardless; and an app that was started in the background
+// enters full screen when it is first brought forward.
+//
 // Loaded with DYLD_INSERT_LIBRARIES.
 #import <Cocoa/Cocoa.h>
 #import <objc/runtime.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
 
 @interface QNOverlay : NSWindow
 @property(weak) NSWindow* fullScreenWindow;
@@ -48,6 +61,43 @@ static NSSize gSize;
 static __thread int gInUIInfo;
 static QNOverlay* gOverlay;
 static NSView* gView;
+static BOOL gStarted;
+
+// Starts a guest QEMU was told to hold (-S): QMP capabilities, then "cont".
+static void StartGuest(void) {
+    if (gStarted)
+        return;
+    gStarted = YES;
+    const char* path = getenv("QEMU_NOTCH_QMP");
+    if (path == NULL || path[0] == '\0')
+        return;
+    NSString* socketPath = [NSString stringWithUTF8String:path];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (fd < 0)
+            return;
+        struct sockaddr_un address = {.sun_family = AF_UNIX};
+        strlcpy(address.sun_path, socketPath.UTF8String, sizeof(address.sun_path));
+        if (connect(fd, (struct sockaddr*)&address, sizeof(address)) == 0) {
+            const char* commands = "{\"execute\":\"qmp_capabilities\"}\n"
+                "{\"execute\":\"cont\"}\n";
+            write(fd, commands, strlen(commands));
+            char reply[512];
+            // greeting, capabilities and cont each answer one line
+            for (int lines = 0; lines < 3;) {
+                ssize_t n = read(fd, reply, sizeof(reply));
+                if (n <= 0)
+                    break;
+                for (ssize_t i = 0; i < n; i++)
+                    lines += reply[i] == '\n';
+            }
+        } else {
+            fprintf(stderr, "qemu-notch: could not start the guest over %s\n",
+                socketPath.UTF8String);
+        }
+        close(fd);
+    });
+}
 
 static BOOL IsOverlay(NSWindow* window) {
     return window != nil && window == gOverlay;
@@ -136,6 +186,8 @@ static void EnterOverlay(NSWindow* full) {
     [overlay makeKeyAndOrderFront:nil];
     [overlay makeFirstResponder:view];
     Refresh(view);
+    // the guest's first look at the display is the panel's size
+    StartGuest();
 }
 
 static void LeaveOverlay(NSWindow* full) {
@@ -183,6 +235,31 @@ __attribute__((constructor)) static void Init(void) {
     }
 
     NSNotificationCenter* center = [NSNotificationCenter defaultCenter];
+    if (getenv("QEMU_NOTCH_QMP") != NULL) {
+        // full-screen=on is ignored while the app is not active, and an app
+        // started in the background cannot activate itself; enter full screen
+        // when it is first brought forward. The guest waits for that, 30 s at
+        // most.
+        [center addObserverForName:NSApplicationDidBecomeActiveNotification object:nil
+                             queue:nil
+                        usingBlock:^(NSNotification* note) {
+                            if (gOverlay != nil || gStarted)
+                                return;
+                            for (NSWindow* window in NSApp.windows) {
+                                if ([window.contentView isKindOfClass:objc_getClass("QemuCocoaView")]
+                                    && (window.styleMask & NSWindowStyleMaskFullScreen) == 0) {
+                                    [window toggleFullScreen:nil];
+                                    break;
+                                }
+                            }
+                        }];
+        [center addObserverForName:NSApplicationDidFinishLaunchingNotification object:nil
+                             queue:nil
+                        usingBlock:^(NSNotification* note) {
+                            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 30 * NSEC_PER_SEC),
+                                dispatch_get_main_queue(), ^{ StartGuest(); });
+                        }];
+    }
     [center addObserverForName:NSWindowDidEnterFullScreenNotification object:nil queue:nil
                     usingBlock:^(NSNotification* note) { EnterOverlay(note.object); }];
     [center addObserverForName:NSWindowWillExitFullScreenNotification object:nil queue:nil

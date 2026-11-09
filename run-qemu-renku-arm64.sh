@@ -200,6 +200,14 @@ else
 		[ -f "$NOTCH" ] || "$DIR/tools/qemu-notch/build.sh" >/dev/null \
 			|| echo "could not build $NOTCH -- full screen will stop below the notch" >&2
 		[ -f "$NOTCH" ] && ENV_ARGS=(env DYLD_INSERT_LIBRARIES="$NOTCH" QEMU_NOTCH_SIZE="$GUEST_FULL")
+		# Hold the guest (-S) until full screen has offered the panel's size:
+		# app_server picks the UI scale once, at boot, and a guest that booted
+		# while QEMU was still a small window kept the largest scale. The
+		# dylib sends "cont" over QMP once in full screen (or after 30 s).
+		if [ -f "$NOTCH" ] && [ "$FULLSCREEN" = "1" ]; then
+			ENV_ARGS+=(QEMU_NOTCH_QMP="$QMP")
+			HOLD_ARGS=(-S)
+		fi
 	fi
 fi
 
@@ -224,6 +232,7 @@ QEMU_ARGS=(
 	-audiodev "${RENKU_AUDIO:-coreaudio}",id=snd0 -device intel-hda -device hda-duplex,audiodev=snd0
 	-qmp unix:"$QMP",server,nowait
 	"${DISPLAY_ARGS[@]}"
+	"${HOLD_ARGS[@]+"${HOLD_ARGS[@]}"}"
 )
 
 # --clipboard needs to clean up its background sync loop once qemu exits,
