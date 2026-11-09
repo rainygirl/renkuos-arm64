@@ -1,0 +1,43 @@
+Subject: [PATCH] arm64 kernel: don't free a page table a user map never had
+
+A user VMSAv8TranslationMap is created with fPageTable 0 and gets its
+top-level table on the first Map(). One destroyed before anything was
+mapped -- fork_team() giving up for lack of memory, after creating the
+child's address space -- has no table, but the destructor called
+FreeTable(0, ...) regardless. That walks physical page 0 through the
+kernel's physical map (0xffffff0000000000), which is not RAM on QEMU's
+virt machine, and the first atomic swap faults:
+
+    PANIC: vm_page_fault: unhandled page fault in kernel space at
+           0xffffff0000000000, ip ... __aarch64_swp8_acq_rel
+    VMSAv8TranslationMap::~VMSAv8TranslationMap
+    VMAddressSpace::~VMAddressSpace
+    fork_team
+    _kern_fork  (sshd-session; R Chromium's content_shell)
+
+Seen twice on the RENKU arm64 VM (4 GB) after "low resource memory:
+critical": a failed fork, which should have been an error the caller
+handles, took the machine into the kernel debugger instead.
+
+diff --git a/src/system/kernel/arch/arm64/VMSAv8TranslationMap.cpp b/src/system/kernel/arch/arm64/VMSAv8TranslationMap.cpp
+index c4ca593238..b7d74724c3 100644
+--- a/src/system/kernel/arch/arm64/VMSAv8TranslationMap.cpp
++++ b/src/system/kernel/arch/arm64/VMSAv8TranslationMap.cpp
+@@ -151,9 +151,14 @@ VMSAv8TranslationMap::~VMSAv8TranslationMap()
+ 		}
+ 	}
+ 
+-	vm_page_reservation reservation = {};
+-	FreeTable(fPageTable, 0, fInitialLevel, &reservation);
+-	vm_page_unreserve_pages(&reservation);
++	// A user map gets its top-level table on the first Map() call, so one
++	// destroyed before anything was mapped -- fork_team() failing for lack
++	// of memory -- has none, and FreeTable(0) would walk physical page 0.
++	if (fPageTable != 0) {
++		vm_page_reservation reservation = {};
++		FreeTable(fPageTable, 0, fInitialLevel, &reservation);
++		vm_page_unreserve_pages(&reservation);
++	}
+ }
+ 
+ 
