@@ -1,0 +1,84 @@
+Subject: [PATCH] kernel/vm: take shadowed pages out of MODIFIED before freeing them
+
+Since 3bfaa91290 ("Per-KDiskDevice modified queues and page writers") a
+MODIFIED page's queue is found through its cache, so vm_page_free_etc()
+asserts that the page is not MODIFIED: once RemovePage() has run it has no
+cache. That commit made VMCache::_FreePageRange() and VMCache::Delete() move
+such a page to CACHED first, but the two paths that free pages shadowed
+during an anonymous cache merge were left out:
+
+- VMAnonymousCache::_MergePagesSmallerConsumer(), for a source page shadowed
+  by a consumer page, and
+- VMAnonymousCache::_MergeSwapPages(), for a source page shadowed by a
+  consumer swap page.
+
+An exec() after fork() merges the parent's area caches, so on the RENKU
+arm64 VM, under memory pressure, sshd stopped the machine in the kernel
+debugger:
+
+    PANIC: ASSERT FAILED (vm_page.cpp:3172): (page->State() != PAGE_STATE_MODIFIED)
+    vm_page_free_etc
+    VMAnonymousCache::_MergePagesSmallerConsumer
+    VMCache::_MergeWithOnlyConsumer
+    VMCache::Unlock / VMCache::Delete
+    delete_area / vm_delete_areas
+    _user_exec
+
+The shadowed page's data is dropped, so it needs no write-back: clear
+"modified" and move it to CACHED while it is still in its cache, as
+_FreePageRange() does.
+
+diff --git a/src/system/kernel/vm/VMAnonymousCache.cpp b/src/system/kernel/vm/VMAnonymousCache.cpp
+index 0571e30b99..052d13748e 100644
+--- a/src/system/kernel/vm/VMAnonymousCache.cpp
++++ b/src/system/kernel/vm/VMAnonymousCache.cpp
+@@ -1232,6 +1232,21 @@ VMAnonymousCache::_SwapBlockGetAddress(off_t pageIndex)
+ }
+ 
+ 
++/*static*/ void
++VMAnonymousCache::_PrepareToFreeShadowedPage(vm_page* page)
++{
++	// A page shadowed by the consumer is discarded, so it need not be written
++	// back. It must leave the MODIFIED state while it is still in its cache:
++	// a MODIFIED page's queue is found through its cache, and
++	// vm_page_free_etc() refuses one (as VMCache::_FreePageRange() and
++	// VMCache::Delete() already handle).
++	if (page->State() == PAGE_STATE_MODIFIED) {
++		page->modified = false;
++		vm_page_set_state(page, PAGE_STATE_CACHED);
++	}
++}
++
++
+ void
+ VMAnonymousCache::_MergePagesSmallerConsumer(VMAnonymousCache* source)
+ {
+@@ -1255,6 +1270,7 @@ VMAnonymousCache::_MergePagesSmallerConsumer(VMAnonymousCache* source)
+ 			ASSERT_PRINT(sourcePage->WiredCount() == 0
+ 					&& sourcePage->mappings.IsEmpty(),
+ 				"sourcePage: %p, page: %p", sourcePage, page);
++			_PrepareToFreeShadowedPage(sourcePage);
+ 			source->RemovePage(sourcePage);
+ 			vm_page_free_etc(source, sourcePage, &reservation);
+ 		}
+@@ -1307,6 +1323,7 @@ VMAnonymousCache::_MergeSwapPages(VMAnonymousCache* source)
+ 					if (page != NULL) {
+ 						DEBUG_PAGE_ACCESS_START(page);
+ 						ASSERT_PRINT(!page->busy, "page: %p", page);
++						_PrepareToFreeShadowedPage(page);
+ 						source->RemovePage(page);
+ 						vm_page_free(source, page);
+ 					}
+diff --git a/src/system/kernel/vm/VMAnonymousCache.h b/src/system/kernel/vm/VMAnonymousCache.h
+index c4b8e53b96..1ed7b01adf 100644
+--- a/src/system/kernel/vm/VMAnonymousCache.h
++++ b/src/system/kernel/vm/VMAnonymousCache.h
+@@ -93,6 +93,7 @@ private:
+ 			void				_SwapBlockFree(off_t pageIndex, uint32 count);
+ 			swap_addr_t			_SwapBlockGetAddress(off_t pageIndex);
+ 
++	static	void				_PrepareToFreeShadowedPage(vm_page* page);
+ 			void				_MergePagesSmallerConsumer(
+ 									VMAnonymousCache* source);
+ 			void				_MergeSwapPages(VMAnonymousCache* source);
