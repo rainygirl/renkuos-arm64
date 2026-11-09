@@ -64,10 +64,12 @@
 #   macOS keeps a native full-screen window below a MacBook's camera notch,
 #   which left a black strip across the top of the guest. The cocoa display
 #   is therefore run with tools/qemu-notch/libqemu-notch.dylib injected
-#   (built on first use), which turns QEMU's full screen into a borderless
-#   window over the whole screen, the strip beside the notch included. The
-#   guest's screen defaults to the Mac's main display resolution (2560x1664
-#   on a 13" MacBook Air) so it fills that 1:1; RENKU_RES=WxH overrides it,
+#   (built on first use). Full screen stays macOS's own (a Space of its own,
+#   Cmd-Tab works); the dylib moves QEMU's view into a window over the whole
+#   screen inside that Space, the strip beside the notch included. The guest
+#   is offered the Mac's main display resolution (2560x1664 on a 13" MacBook
+#   Air) and its real size, and R Retina picks the UI scale from that;
+#   RENKU_RES=WxH overrides the resolution, RENKU_GUEST_SCALE multiplies it,
 #   RENKU_NOTCH=0 leaves QEMU's own full screen alone.
 #
 # Clipboard sync (--clipboard):
@@ -175,19 +177,29 @@ case "$RES" in
 	*) RES=2560x1600 ;;
 esac
 GPU=(-device virtio-gpu-pci,xres="${RES%x*}",yres="${RES#*x}")
+# What full screen offers the guest (with the notch dylib): the panel times
+# RENKU_GUEST_SCALE each way, 1 by default -- the panel's own 2560x1664.
+# RenkuOS chooses its UI scale from the pixel density (R Retina, UI scale
+# Automatic: 2x at 224 dpi). A scale of 2 needs a virtio_gpu frame buffer
+# larger than R Retina's 5120x2880.
+GUEST_SCALE="${RENKU_GUEST_SCALE:-1}"
+GUEST_FULL="$(( ${RES%x*} * GUEST_SCALE ))x$(( ${RES#*x} * GUEST_SCALE ))"
 
 ENV_ARGS=()
 if [ "$HEADLESS" = "1" ]; then
 	DISPLAY_ARGS=(-display none "${GPU[@]}" -serial file:"$SERIAL")
 else
-	COCOA=cocoa,zoom-to-fit=on
+	# zoom-interpolation: the guest is scaled into the window's backing store
+	# (2940x1912 on a 2560x1664 panel set to "looks like 1470x956"), and
+	# QEMU's default nearest-neighbour scaling dithers; smooth it instead
+	COCOA=cocoa,zoom-to-fit=on,zoom-interpolation=on
 	[ "$FULLSCREEN" = "1" ] && COCOA="$COCOA,full-screen=on"
 	DISPLAY_ARGS=(-display "$COCOA" "${GPU[@]}" -serial file:"$SERIAL")
 	if [ "${RENKU_NOTCH:-1}" = "1" ]; then
 		NOTCH="$DIR/tools/qemu-notch/libqemu-notch.dylib"
 		[ -f "$NOTCH" ] || "$DIR/tools/qemu-notch/build.sh" >/dev/null \
 			|| echo "could not build $NOTCH -- full screen will stop below the notch" >&2
-		[ -f "$NOTCH" ] && ENV_ARGS=(env DYLD_INSERT_LIBRARIES="$NOTCH" QEMU_NOTCH_PANEL="$RES")
+		[ -f "$NOTCH" ] && ENV_ARGS=(env DYLD_INSERT_LIBRARIES="$NOTCH" QEMU_NOTCH_SIZE="$GUEST_FULL")
 	fi
 fi
 

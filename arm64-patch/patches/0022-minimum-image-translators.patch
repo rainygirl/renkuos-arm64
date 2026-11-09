@@ -1,0 +1,60 @@
+Subject: [PATCH] minimum arm64: ship the image translators
+
+The minimum profile's SYSTEM_ADD_ONS_TRANSLATORS is STXTTranslator alone.
+ShowImage is on the image but could open nothing, and a JPEG chosen in
+Backgrounds was never drawn on the desktop (Tracker found no translator
+for it).
+
+JPEG, PNG, WebP and AVIF translators need libjpeg-turbo, libpng, libwebp
+and libavif as build features, i.e. -devel packages, and arm64 HaikuPorts
+publishes none of them. The image already carries the runtime libraries
+(haikuwebkit bundles libjpeg.so.62, libpng16.so.16 and libwebp.so.7;
+libavif1.0 has libavif.so.16), so the translators are built against those
+outside this tree and added as a prebuilt package, as 0014 does for
+WebPositive: renku_imagetranslators in ../packages/, staged into download/
+by build-renku-arm64-iso.sh. It holds AVIF, BMP, GIF, HVIF, ICO, JPEG,
+PCX, PNG, PPM, PSD, RAW, RTF, SGI, TGA, WebP and WonderBrush, built from
+this tree's sources (8484655099) with a forced-include header that gives
+them a correct float byte swap (see 0021) and the
+B_TRANSLATOR_EXT_DOCUMENT_COUNT/INDEX strings, so the same package also
+works on images built before 0021 and before 13a583a7f0.
+
+Vendor is "Haiku Project", as this build's local repository requires (see
+0020).
+
+diff --git a/build/jam/DefaultBuildProfiles b/build/jam/DefaultBuildProfiles
+--- a/build/jam/DefaultBuildProfiles
++++ b/build/jam/DefaultBuildProfiles
+@@ -249,6 +249,19 @@
+ 					rappmarket
+ 					;
+ 			}
++
++			# The image translators. The minimum profile ships STXTTranslator
++			# alone, so ShowImage opened nothing and a picture chosen as the
++			# desktop background was never drawn. JPEG, PNG, WebP and AVIF
++			# need libjpeg-turbo, libpng, libwebp and libavif, which arm64
++			# HaikuPorts does not publish as -devel packages for this tree to
++			# build against; the package is prebuilt against the copies the
++			# image already has (haikuwebkit, libavif1.0), like webpositive.
++			if $(TARGET_PACKAGING_ARCH) = arm64 {
++				AddHaikuImageSystemPackages
++					renku_imagetranslators
++					;
++			}
+ 		}
+ 
+ 		case "test-*" : {
+diff --git a/build/jam/repositories/HaikuPorts/arm64 b/build/jam/repositories/HaikuPorts/arm64
+--- a/build/jam/repositories/HaikuPorts/arm64
++++ b/build/jam/repositories/HaikuPorts/arm64
+@@ -74,6 +74,9 @@
+ 	openssh-10.4p1-1
+ 	# R AppMarket -- published in RENKU Apps, same as curl/gzip/tar/wget above.
+ 	rappmarket-1.0.0-4
++	# The image translators, prebuilt against haikuwebkit's libjpeg-turbo,
++	# libpng and libwebp and libavif1.0's libavif (see DefaultBuildProfiles).
++	renku_imagetranslators-1.0.0-1
+ 	:
+ 	# source packages
+ 	bash

@@ -20,13 +20,13 @@
 // forwarded: a resize updates the guest's bounds and size, losing key focus
 // releases keys and the mouse, and Cmd-F still leaves full screen.
 //
-// What the guest is offered: QEMU proposes the view's size in points, and
-// R Retina's rretina_resize multiplies it by host_scale (2 at 200%), which
-// gives 2940x1912 for 1470x956 pt -- macOS's scaled backing store, not the
-// panel. With QEMU_NOTCH_PANEL=<w>x<h> (the panel's pixels;
-// run-qemu-renku-arm64.sh sets it), full screen proposes the panel divided by
-// the backing scale instead -- 1280x832 for 2560x1664 -- so the guest at 200%
-// runs at exactly the panel's resolution.
+// What the guest is offered: QEMU_NOTCH_SIZE=<w>x<h> (run-qemu-renku-arm64.sh
+// sets it to the panel's own resolution, 2560x1664 on a 13" MacBook
+// Air) is the resolution full screen proposes instead of the screen's size in
+// points, together with the display's real physical size in the EDID. RenkuOS
+// does the Retina part itself: R Retina's rretina_resize takes the proposed
+// size at host_scale 1 (UI scale Automatic), and app_server picks the UI
+// scale from the EDID's pixel density.
 //
 // Loaded with DYLD_INSERT_LIBRARIES.
 #import <Cocoa/Cocoa.h>
@@ -42,9 +42,10 @@
 - (void)toggleFullScreen:(id)sender { [self.fullScreenWindow toggleFullScreen:sender]; }
 @end
 
-static IMP gSetContentSize, gSetContentAspectRatio, gUpdateUIInfoLocked, gViewFrame;
-static NSSize gPanel;
-static int gInUIInfo;
+static IMP gSetContentSize, gSetContentAspectRatio, gUpdateUIInfoLocked, gViewFrame,
+    gScreenFrame;
+static NSSize gSize;
+static __thread int gInUIInfo;
 static QNOverlay* gOverlay;
 static NSView* gView;
 
@@ -80,14 +81,24 @@ static void UpdateUIInfoLocked(NSView* self, SEL _cmd) {
 }
 
 // Only while updateUIInfoLocked runs, and only in the overlay: drawing, layout
-// and input see the real frame.
+// and input see the real frames. The view (filling the screen) reads as the
+// proposed size; the screen reads the same, so QEMU's
+// width_mm = frame / screen * physical stays the panel's physical size.
+static BOOL Proposing(NSWindow* window) {
+    return gInUIInfo > 0 && gSize.width > 0 && IsOverlay(window);
+}
+
 static NSRect ViewFrame(NSView* self, SEL _cmd) {
     NSRect frame = ((NSRect (*)(id, SEL))gViewFrame)(self, _cmd);
-    NSWindow* window = self.window;
-    if (gInUIInfo > 0 && gPanel.width > 0 && IsOverlay(window)) {
-        CGFloat scale = window.backingScaleFactor > 0 ? window.backingScaleFactor : 2;
-        frame.size = NSMakeSize(gPanel.width / scale, gPanel.height / scale);
-    }
+    if (Proposing(self.window))
+        frame.size = gSize;
+    return frame;
+}
+
+static NSRect ScreenFrameOverride(NSScreen* self, SEL _cmd) {
+    NSRect frame = ((NSRect (*)(id, SEL))gScreenFrame)(self, _cmd);
+    if (gOverlay != nil && Proposing(gOverlay) && self == gOverlay.screen)
+        frame.size = gSize;
     return frame;
 }
 
@@ -151,10 +162,10 @@ __attribute__((constructor)) static void Init(void) {
         class_getInstanceMethod(window, @selector(setContentAspectRatio:)),
         (IMP)SetContentAspectRatio);
 
-    const char* panel = getenv("QEMU_NOTCH_PANEL");
+    const char* panel = getenv("QEMU_NOTCH_SIZE");
     int w = 0, h = 0;
     if (panel != NULL && sscanf(panel, "%dx%d", &w, &h) == 2 && w > 0 && h > 0)
-        gPanel = NSMakeSize(w, h);
+        gSize = NSMakeSize(w, h);
 
     Class view = objc_getClass("QemuCocoaView");
     Method update = view ? class_getInstanceMethod(view, @selector(updateUIInfoLocked)) : NULL;
@@ -164,6 +175,9 @@ __attribute__((constructor)) static void Init(void) {
         Method frame = class_getInstanceMethod([NSView class], @selector(frame));
         gViewFrame = method_getImplementation(frame);
         class_addMethod(view, @selector(frame), (IMP)ViewFrame, method_getTypeEncoding(frame));
+        gScreenFrame = method_setImplementation(
+            class_getInstanceMethod([NSScreen class], @selector(frame)),
+            (IMP)ScreenFrameOverride);
     } else {
         fprintf(stderr, "qemu-notch: no -[QemuCocoaView updateUIInfoLocked]\n");
     }
@@ -191,6 +205,6 @@ __attribute__((constructor)) static void Init(void) {
                         if (gOverlay != nil && note.object == gOverlay.fullScreenWindow)
                             [gOverlay makeKeyAndOrderFront:nil];
                     }];
-    if (gPanel.width > 0)
+    if (gSize.width > 0)
         fprintf(stderr, "qemu-notch: full screen proposes %dx%d pixels\n", w, h);
 }

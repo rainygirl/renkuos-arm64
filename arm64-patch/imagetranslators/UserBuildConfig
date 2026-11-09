@@ -1,0 +1,20 @@
+# Put in generated.arm64/ to build the data translators against the arm64 image libraries
+# that the HaikuWebKit build staged in /root/wk/sysroot (libjpeg-turbo 3.1.1,
+# libpng 1.6.50, libwebp 1.5.0, libavif 1.1.1 -- the same files the
+# haikuwebkit package installs on RenkuOS arm64).
+local wkRoot = /root/wk/sysroot/boot/system ;
+local f ;
+for f in jpeg libpng libwebp libavif {
+	SetBuildFeatureAttribute $(f) : headers : $(wkRoot)/develop/headers ;
+	EnableBuildFeatures $(f) ;
+}
+SetBuildFeatureAttribute jpeg : library : $(wkRoot)/develop/lib/libjpeg.so ;
+SetBuildFeatureAttribute libpng : library : $(wkRoot)/develop/lib/libpng16.so ;
+SetBuildFeatureAttribute libwebp : library : $(wkRoot)/develop/lib/libwebp.so ;
+SetBuildFeatureAttribute libavif : library : $(wkRoot)/develop/lib/libavif.so ;
+
+# RenkuOS arm64 workarounds for the translators; see the header.
+AppendToConfigVar CCFLAGS : HAIKU_TOP src add-ons translators
+	: -include /root/renku-arm64-work/translator-fixes.h : global ;
+AppendToConfigVar C++FLAGS : HAIKU_TOP src add-ons translators
+	: -include /root/renku-arm64-work/translator-fixes.h : global ;

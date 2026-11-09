@@ -98,10 +98,14 @@ disk (`renku-arm64-vm.img`) persists between runs either way.
 `--fullscreen` starts full screen (Cmd-F toggles it). Full screen covers the
 whole display, the strip beside a MacBook's camera notch included: macOS keeps
 QEMU's own full screen below the notch, so the script injects
-`tools/qemu-notch/libqemu-notch.dylib` (built on first run), which uses a
-borderless window over the menu bar instead. The guest's screen matches the
-Mac's main display (`RENKU_RES=WxH` to override; `RENKU_NOTCH=0` to turn the
-dylib off).
+`tools/qemu-notch/libqemu-notch.dylib` (built on first run). QEMU still goes
+into a normal macOS full screen -- its own Space, Cmd-Tab and swipes reach
+other apps -- and the dylib moves its view into a window over the whole
+screen inside that Space. The guest is offered the display's own resolution
+(2560x1664 on a 13" MacBook Air) and its real size in the EDID, so R Retina
+(UI scale Automatic) picks 2x itself. `RENKU_RES=WxH` overrides the
+resolution, `RENKU_GUEST_SCALE=2` doubles it, `RENKU_NOTCH=0` turns the
+dylib off.
 
 ## SSH
 

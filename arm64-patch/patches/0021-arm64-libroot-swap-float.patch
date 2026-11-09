@@ -1,0 +1,46 @@
+Subject: [PATCH] arm64 libroot: __swap_float/__swap_double returned garbage
+
+Both had their fmov operands the wrong way round. On AArch64 a float
+argument arrives in s0 (a double in d0) and is returned there, so the
+function has to copy s0 out to w0, byte-reverse w0 and copy it back. The
+original did `fmov s0, w0` first -- overwriting the argument with whatever
+w0 happened to hold -- and `fmov w0, s0` last, leaving that garbage as the
+result. Measured on the guest: __swap_float(1599.0f) returned a73ef000 or
+e666e000 (it depends on w0), not 00e0c744.
+
+B_HOST_TO_BENDIAN_FLOAT and friends are this function, and every image
+translator writes the B_TRANSLATOR_BITMAP header's bounds with it. So
+BBitmapStream (which swaps the header back as uint32s, correctly) built a
+bitmap of a random size and the copy of the decoded rows overran it:
+Tracker crashed drawing a JPEG desktop background, ShowImage crashed
+opening one. Checked with the corrected instructions on the guest:
+00e0c744 for 1599.0f, 0000000000fc9840 for 1599.0, and a round trip.
+
+Prebuilt translators (0022) carry their own correct swap, so they also
+work on images built before this fix.
+
+diff --git a/src/system/libroot/os/arch/arm64/byteorder.S b/src/system/libroot/os/arch/arm64/byteorder.S
+--- a/src/system/libroot/os/arch/arm64/byteorder.S
++++ b/src/system/libroot/os/arch/arm64/byteorder.S
+@@ -10,17 +10,17 @@
+ 
+ /* float __swap_float(float value) */
+ FUNCTION(__swap_float):
+-		fmov s0, w0	// Bitcopy float to general register
++		fmov w0, s0	// Bitcopy float to general register
+ 		rev w0, w0	// GCC8.3 does this for __builtin_bswap32
+-		fmov w0, s0	// and back
++		fmov s0, w0	// and back
+ 		ret
+ FUNCTION_END(__swap_float)
+ 
+ 
+ /* double __swap_double(double value) */
+ FUNCTION(__swap_double):
+-		fmov d0, x0	// Bitcopy double to general register
++		fmov x0, d0	// Bitcopy double to general register
+ 		rev x0, x0	// GCC8.3 does this for __builtin_bswap64
+-		fmov x0, d0	// and back
++		fmov d0, x0	// and back
+ 		ret
+ FUNCTION_END(__swap_double)

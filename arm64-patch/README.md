@@ -63,7 +63,7 @@ be booted to a desktop, for the reason given under
 That is the one that yields a medium you can boot *and* install from.
 
 
-### Beyond audio: 0005-0020
+### Beyond audio: 0005-0022
 
 What testing every application on an installed arm64 system turned up, fixed
 in the image rather than worked around in it:
@@ -86,6 +86,8 @@ in the image rather than worked around in it:
 | *(0018 retired)* | `0018-tcp-spawn-unbound` fixed a `_Spawn()` panic (`bound endpoint ... not in hash!`) the same way upstream's own `96d06c2e46` ("tcp: _Spawn() resets local address", cherry-picked from mainline Haiku) now does -- identical one-line fix, same file, same spot. Removed outright rather than kept empty like 0005/0007: nothing of it is this project's own anymore. The gap in the numbering is deliberate, not a renumber of everything after it. |
 | `0019-net-notifications-keep-loaded` | The boot could deadlock. net_server was unloading the network notifications module and held the module lock while `unregister_generic_syscall()` waited for an in-flight `net_notifications_control()` call. That call (launch_daemon adding a listener) was itself waiting for the module lock in `FirstAdded()` -> `get_module()`. The module is now `B_KEEP_LOADED`, and `FirstAdded()`/`LastRemoved()` no longer call `get_module()`/`put_module()`. Seen once in 14 x86_64 boots. |
 | `0020-minimum-rappmarket` | R AppMarket (browse and install every app in each pkgman repository it knows about, from a window) had to be `pkgman install`ed by hand before a fresh guest could use it to install anything else in RENKU Apps. Ships the package the same way 0012/0016 ship prebuilt curl/openssh: `packages/rappmarket-1.0.0-4-arm64.hpkg`, declared in the arm64 repository list and `AddHaikuImageSystemPackages`. |
+| `0021-arm64-libroot-swap-float` | `__swap_float`/`__swap_double` (`B_HOST_TO_BENDIAN_FLOAT` and friends) had their `fmov` operands reversed and returned garbage: `__swap_float(1599.0f)` gave `a73ef000`, not `00e0c744`. Every image translator writes its bitmap header's bounds with it, so BBitmapStream made a bitmap of a random size and overran it -- Tracker crashed drawing a JPEG background, ShowImage crashed opening one. Fixed instructions checked on the guest for float, double and a round trip. |
+| `0022-minimum-image-translators` | The minimum profile ships STXTTranslator alone, so ShowImage opened nothing and a JPEG set in Backgrounds was never drawn. Adds `packages/renku_imagetranslators-1.0.0-1-arm64.hpkg` (AVIF, BMP, GIF, HVIF, ICO, JPEG, PCX, PNG, PPM, PSD, RAW, RTF, SGI, TGA, WebP, WonderBrush), prebuilt because arm64 HaikuPorts has no libjpeg/libpng/libwebp/libavif -devel packages; they link the copies haikuwebkit and libavif1.0 already put on the image. How it was built: `imagetranslators/`. |
 
 ## Use
 

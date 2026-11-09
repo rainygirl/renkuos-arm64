@@ -98,9 +98,12 @@ OS가 하나도 없는 빈 디스크만 만들어집니다.
 `--fullscreen`은 전체화면으로 시작합니다(Cmd-F로 전환). 전체화면은 맥북
 카메라 노치 양옆까지 화면 전체를 씁니다. macOS는 QEMU 자체 전체화면을 노치
 아래에 두기 때문에, 스크립트가 `tools/qemu-notch/libqemu-notch.dylib`(첫
-실행 때 빌드)를 주입해 메뉴바 위를 덮는 테두리 없는 창으로 대신합니다.
-게스트 해상도는 맥의 메인 디스플레이에 맞춥니다(`RENKU_RES=WxH`로 지정,
-`RENKU_NOTCH=0`이면 dylib를 쓰지 않음).
+실행 때 빌드)를 주입합니다. QEMU는 그대로 macOS 기본 전체화면(자기 Space,
+Cmd-Tab과 스와이프로 다른 앱 전환 가능)에 들어가고, dylib가 그 Space 안에서
+화면 전체를 덮는 창으로 QEMU 화면을 옮깁니다. 게스트에는 디스플레이 자체
+해상도(13인치 맥북 에어는 2560x1664)와 실제 크기(EDID)를 알려서, R Retina
+(UI 배율 자동)가 스스로 2배를 고릅니다. `RENKU_RES=WxH`로 해상도 지정,
+`RENKU_GUEST_SCALE=2`면 두 배, `RENKU_NOTCH=0`이면 dylib를 쓰지 않습니다.
 
 ## SSH
 
