@@ -205,7 +205,18 @@ static void LeaveOverlay(NSWindow* full) {
     Refresh(view);
 }
 
+// macOS naps an app it does not show (QEMU's Space in the background):
+// timers coalesce and the main loop, where QEMU completes the emulated USB
+// disk's I/O, can wait for seconds while the guest's clock runs on. That is
+// how usb_disk's 10 s data timeout fired and BFS stopped the guest. Opt out
+// of App Nap for as long as QEMU runs; idle system sleep is still allowed.
+static id<NSObject> gNoNap;
+
 __attribute__((constructor)) static void Init(void) {
+    gNoNap = [[NSProcessInfo processInfo]
+        beginActivityWithOptions:NSActivityUserInitiatedAllowingIdleSystemSleep
+                                 | NSActivityLatencyCritical
+                          reason:@"virtual machine"];
     Class window = [NSWindow class];
     gSetContentSize = method_setImplementation(
         class_getInstanceMethod(window, @selector(setContentSize:)),
