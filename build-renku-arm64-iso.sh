@@ -329,6 +329,39 @@ export HAIKU_NO_DOWNLOADS=1
 
 SRC_ISO="$GEN/haiku-minimum-anyboot.iso"
 [ -f "$SRC_ISO" ] || die "expected ISO not found at $SRC_ISO"
+
+# The EFI system partition is built in the same jam pass as haiku_loader.efi,
+# and one incremental build packed it while the loader was being rewritten:
+# BOOTAA64.EFI went in as 0 bytes and the ISO dropped to the UEFI shell.
+# Compare its size in the El Torito image with the loader's, and rebuild
+# the partition once if they differ.
+esp_loader_ok() {
+	python3 - "$1" "$GEN/objects/haiku/arm64/release/system/boot/efi/haiku_loader.efi" <<'PYEOF'
+import os, struct, sys
+iso, loader = sys.argv[1:]
+with open(iso, "rb") as f:
+    f.seek(17 * 2048)
+    catalog = struct.unpack("<I", f.read(2048)[0x47:0x4B])[0]
+    f.seek(catalog * 2048)
+    entry = f.read(64)[32:64]
+    sectors = struct.unpack("<H", entry[6:8])[0]
+    rba = struct.unpack("<I", entry[8:12])[0]
+    f.seek(rba * 2048)
+    esp = f.read(sectors * 512)
+i = esp.find(b"BOOTAA64EFI")
+size = struct.unpack("<I", esp[i + 28:i + 32])[0] if i >= 0 else -1
+print("BOOTAA64.EFI in the ISO: %d bytes, haiku_loader.efi: %d"
+      % (size, os.path.getsize(loader)))
+sys.exit(0 if size == os.path.getsize(loader) else 1)
+PYEOF
+}
+if ! esp_loader_ok "$SRC_ISO"; then
+	log "EFI system partition is stale -- rebuilding it"
+	rm -f "$GEN/objects/haiku/arm64/release/efi/system/boot/esp.image" "$SRC_ISO"
+	( cd "$GEN" && "$JAM" -q -j"$JOBS" haiku-boot-cd )
+	( cd "$GEN" && "$JAM" -q -j"$JOBS" '@minimum-anyboot' )
+	esp_loader_ok "$SRC_ISO" || die "BOOTAA64.EFI in the ISO does not match haiku_loader.efi"
+fi
 mkdir -p "$(dirname "$OUTPUT_ISO")"
 cp "$SRC_ISO" "$OUTPUT_ISO"
 log "Built: $OUTPUT_ISO ($(du -h "$OUTPUT_ISO" | cut -f1))"
