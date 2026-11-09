@@ -61,7 +61,7 @@ Launching x-vnd.haiku-media_server failed: No such file or directory
 합니다. 부팅도 되고 거기서 설치도 되는 매체를 내놓는 쪽은 이 패치입니다.
 
 
-### 오디오 너머: 0005-0023
+### 오디오 너머: 0005-0024
 
 설치된 arm64 시스템에서 모든 앱을 시험하며 드러난 문제를, 이미지 안에서
 우회하지 않고 이미지 자체에서 고친 것들입니다.
@@ -87,6 +87,7 @@ Launching x-vnd.haiku-media_server failed: No such file or directory
 | `0021-arm64-libroot-swap-float` | `__swap_float`/`__swap_double`(`B_HOST_TO_BENDIAN_FLOAT` 등)의 `fmov` 피연산자 순서가 반대라 엉뚱한 값을 돌려줬습니다: `__swap_float(1599.0f)`가 `00e0c744`가 아니라 `a73ef000`. 모든 이미지 트랜슬레이터가 비트맵 헤더의 bounds를 이것으로 쓰기 때문에 BBitmapStream이 엉뚱한 크기의 비트맵을 만들고 넘치게 썼습니다 -- JPEG 배경화면을 그리던 Tracker와 JPEG를 열던 ShowImage가 죽었습니다. 고친 명령을 게스트에서 float, double, 왕복으로 확인했습니다. |
 | `0022-minimum-image-translators` | minimum 프로필에는 STXTTranslator 하나뿐이라 ShowImage가 아무것도 열지 못했고 Backgrounds에서 고른 JPEG도 그려지지 않았습니다. `packages/renku_imagetranslators-1.0.0-1-arm64.hpkg`(AVIF, BMP, GIF, HVIF, ICO, JPEG, PCX, PNG, PPM, PSD, RAW, RTF, SGI, TGA, WebP, WonderBrush)를 추가합니다. arm64 HaikuPorts에 libjpeg/libpng/libwebp/libavif -devel 패키지가 없어 미리 빌드했고, 이미지에 이미 있는 haikuwebkit과 libavif1.0의 라이브러리에 링크합니다. 빌드 방법: `imagetranslators/`. |
 | `0023-arm64-kernel-empty-translation-map` | `fork()`가 실패하면 시스템이 패닉했습니다. 사용자 `VMSAv8TranslationMap`은 첫 `Map()` 때 페이지 테이블을 만드는데, 그 전에 지워지면(메모리 부족으로 `fork_team()`이 포기할 때) `fPageTable`이 0인데도 소멸자가 해제하려고 물리 페이지 0을 훑었습니다(`fork_team`에서 부른 `~VMSAv8TranslationMap`에서 `unhandled page fault in kernel space at 0xffffff0000000000`). 4GB VM에서 메모리가 부족할 때 sshd와 R Chromium에서 두 번 일어났습니다. |
+| `0024-libbe-app-launched-by-exec` | 스크립트가 `exec()`로 실행하는 앱(R Chromium, 웹앱 런처)이 CPU 코어 하나를 계속 썼습니다. roster가 실행한 팀의 루퍼 포트를 만들어 주는데 `exec()`가 그 팀의 포트를 지우고, `BApplication`은 지워진 포트를 그대로 받아 써서 `task_looper()`가 `B_BAD_PORT_ID`로 공회전했습니다. 이제 roster의 포트가 살아 있고 그 팀 소유일 때만 받아 쓰고, 아니면 자기 포트를 씁니다. |
 
 ## 사용법
 

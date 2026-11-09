@@ -1,0 +1,38 @@
+Subject: [PATCH] libbe: don't adopt the roster's looper port after exec()
+
+When the roster launches an application it pre-registers the new team and
+creates a looper port for it, owned by that team. BApplication then drops
+its own port and adopts the roster's. That breaks when the file launched is
+a script that exec()s the real application -- R Chromium, R Twitter and
+the other web-app launchers do exactly that: exec() deletes every port the
+team owns, so the BApplication built after it adopts a port that no longer
+exists. task_looper() then retries the failing read forever, and the app's
+main thread uses a whole CPU core in port_count()/port_buffer_size_etc()
+returning B_BAD_PORT_ID, while messages to the application are lost.
+
+Only adopt the roster's port if it is still alive and owned by this team;
+otherwise keep the looper's own port. The registrar records whatever port
+CompleteRegistration() reports, so nothing else needs to change.
+
+diff --git a/src/kits/app/Application.cpp b/src/kits/app/Application.cpp
+index 8620dbdcc8..51dec0a4bd 100644
+--- a/src/kits/app/Application.cpp
++++ b/src/kits/app/Application.cpp
+@@ -432,8 +432,15 @@ BApplication::_InitData(const char* signature, bool initGUI, status_t* _error)
+ 	if (preRegistered) {
+ 		// we are pre-registered => the app info has been filled in
+ 		// Check whether we need to replace the looper port with a port
+-		// created by the roster.
+-		if (appInfo.port >= 0 && appInfo.port != fMsgPort) {
++		// created by the roster. The roster gives that port to the team it
++		// launched, and exec() deletes a team's ports: an app started by a
++		// launcher script that exec()s it would adopt a dead port and spin
++		// in task_looper() on B_BAD_PORT_ID. Keep our own port then; the
++		// registrar takes whatever port CompleteRegistration() reports.
++		port_info portInfo;
++		if (appInfo.port >= 0 && appInfo.port != fMsgPort
++			&& get_port_info(appInfo.port, &portInfo) == B_OK
++			&& portInfo.team == team) {
+ 			delete_port(fMsgPort);
+ 			fMsgPort = appInfo.port;
+ 		} else

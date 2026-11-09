@@ -63,7 +63,7 @@ be booted to a desktop, for the reason given under
 That is the one that yields a medium you can boot *and* install from.
 
 
-### Beyond audio: 0005-0023
+### Beyond audio: 0005-0024
 
 What testing every application on an installed arm64 system turned up, fixed
 in the image rather than worked around in it:
@@ -89,6 +89,7 @@ in the image rather than worked around in it:
 | `0021-arm64-libroot-swap-float` | `__swap_float`/`__swap_double` (`B_HOST_TO_BENDIAN_FLOAT` and friends) had their `fmov` operands reversed and returned garbage: `__swap_float(1599.0f)` gave `a73ef000`, not `00e0c744`. Every image translator writes its bitmap header's bounds with it, so BBitmapStream made a bitmap of a random size and overran it -- Tracker crashed drawing a JPEG background, ShowImage crashed opening one. Fixed instructions checked on the guest for float, double and a round trip. |
 | `0022-minimum-image-translators` | The minimum profile ships STXTTranslator alone, so ShowImage opened nothing and a JPEG set in Backgrounds was never drawn. Adds `packages/renku_imagetranslators-1.0.0-1-arm64.hpkg` (AVIF, BMP, GIF, HVIF, ICO, JPEG, PCX, PNG, PPM, PSD, RAW, RTF, SGI, TGA, WebP, WonderBrush), prebuilt because arm64 HaikuPorts has no libjpeg/libpng/libwebp/libavif -devel packages; they link the copies haikuwebkit and libavif1.0 already put on the image. How it was built: `imagetranslators/`. |
 | `0023-arm64-kernel-empty-translation-map` | A failed `fork()` panicked the machine. A user `VMSAv8TranslationMap` gets its page table on the first `Map()`; one destroyed before that -- `fork_team()` giving up for lack of memory -- has `fPageTable` 0, and the destructor freed it anyway, walking physical page 0 (`unhandled page fault in kernel space at 0xffffff0000000000`, in `~VMSAv8TranslationMap` from `fork_team`). Hit twice on a 4 GB VM under memory pressure, from sshd and from R Chromium. |
+| `0024-libbe-app-launched-by-exec` | Apps launched through a script that `exec()`s them (R Chromium, the web-app launchers) used a whole CPU core. The roster creates the launched team's looper port, `exec()` deletes the team's ports, and `BApplication` adopted the dead port anyway, so `task_looper()` spun on `B_BAD_PORT_ID`. It now keeps its own port unless the roster's is alive and owned by the team. |
 
 ## Use
 
