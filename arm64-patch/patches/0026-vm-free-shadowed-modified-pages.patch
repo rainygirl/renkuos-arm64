@@ -1,32 +1,40 @@
 Subject: [PATCH] kernel/vm: take shadowed pages out of MODIFIED before freeing them
 
-Since 3bfaa91290 ("Per-KDiskDevice modified queues and page writers") a
-MODIFIED page's queue is found through its cache, so vm_page_free_etc()
-asserts that the page is not MODIFIED: once RemovePage() has run it has no
-cache. That commit made VMCache::_FreePageRange() and VMCache::Delete() move
-such a page to CACHED first, but the two paths that free pages shadowed
-during an anonymous cache merge were left out:
+Since 3bfaa91290 ("Per-KDiskDevice modified queues and page writers"),
+which landed on 2026-07-18, a MODIFIED page's queue is found through its
+cache, so vm_page_free_etc() asserts that the page is not MODIFIED: after
+RemovePage() it has no cache.
+That commit made VMCache::_FreePageRange() and VMCache::Delete() move such
+a page to CACHED first. The two paths that free pages shadowed during an
+anonymous cache merge did not:
 
-- VMAnonymousCache::_MergePagesSmallerConsumer(), for a source page shadowed
-  by a consumer page, and
+- VMAnonymousCache::_MergePagesSmallerConsumer(), for a source page
+  shadowed by a consumer page, and
 - VMAnonymousCache::_MergeSwapPages(), for a source page shadowed by a
   consumer swap page.
 
-An exec() after fork() merges the parent's area caches, so on the RENKU
-arm64 VM, under memory pressure, sshd stopped the machine in the kernel
-debugger:
+exec() after fork() merges the area caches, and under memory pressure
+sshd stopped the machine in the kernel debugger:
 
-    PANIC: ASSERT FAILED (vm_page.cpp:3172): (page->State() != PAGE_STATE_MODIFIED)
-    vm_page_free_etc
-    VMAnonymousCache::_MergePagesSmallerConsumer
-    VMCache::_MergeWithOnlyConsumer
-    VMCache::Unlock / VMCache::Delete
-    delete_area / vm_delete_areas
-    _user_exec
+  PANIC: ASSERT FAILED (vm_page.cpp:3172):
+    (page->State() != PAGE_STATE_MODIFIED)
+  vm_page_free_etc
+  VMAnonymousCache::_MergePagesSmallerConsumer
+  VMCache::_MergeWithOnlyConsumer
+  VMCache::Unlock
+  VMCache::Delete
+  delete_area
+  vm_delete_areas
+  _user_exec
 
-The shadowed page's data is dropped, so it needs no write-back: clear
+The shadowed page's data is dropped, so it needs no write-back. Clear
 "modified" and move it to CACHED while it is still in its cache, as
 _FreePageRange() does.
+
+Upstream: https://github.com/RenkuOS/Source/pull/343
+Signed-off-by: rainygirl <rainygirl@gmail.com>
+Assisted-by: Claude Opus 5.5
+
 
 diff --git a/src/system/kernel/vm/VMAnonymousCache.cpp b/src/system/kernel/vm/VMAnonymousCache.cpp
 index 0571e30b99..052d13748e 100644
