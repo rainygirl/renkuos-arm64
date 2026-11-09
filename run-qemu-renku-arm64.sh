@@ -3,7 +3,7 @@
 # Boot RenkuOS arm64 in QEMU, on Apple Silicon (hvf) or under emulation.
 #
 # Usage:
-#   ./run-qemu-renku-arm64.sh                boot the installed disk, in a window
+#   ./run-qemu-renku-arm64.sh                boot the installed disk, full screen
 #   ./run-qemu-renku-arm64.sh --install      boot the ISO with the disk attached,
 #                                       to partition and install with it
 #   ./run-qemu-renku-arm64.sh --headless     no window; QMP control socket only
@@ -12,7 +12,9 @@
 #                                       (see "Bridged networking" below)
 #   ./run-qemu-renku-arm64.sh --clipboard    sync the Mac's clipboard with
 #                                       the guest's (see "Clipboard sync")
-#   ./run-qemu-renku-arm64.sh --fullscreen   start full screen (Cmd-F toggles)
+#   ./run-qemu-renku-arm64.sh --window       start in a window instead of full
+#                                       screen (Cmd-F toggles either way);
+#                                       --fullscreen is accepted, the default
 #
 # The disk (renku-arm64-vm.img, created empty on first run) persists between
 # runs. The installer medium is renku-arm64.iso, built by
@@ -93,7 +95,7 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DISK="${RENKU_DISK:-$DIR/renku-arm64-vm.img}"
 ISO="${RENKU_ISO:-$DIR/renku-arm64.iso}"
 
-INSTALL=0; HEADLESS=0; FORCE_TCG=0; BRIDGED=0; CLIPBOARD=0; FULLSCREEN=0
+INSTALL=0; HEADLESS=0; FORCE_TCG=0; BRIDGED=0; CLIPBOARD=0; FULLSCREEN=1
 for a in "$@"; do
 	case "$a" in
 		--install)   INSTALL=1 ;;
@@ -102,6 +104,7 @@ for a in "$@"; do
 		--bridged)   BRIDGED=1 ;;
 		--clipboard) CLIPBOARD=1 ;;
 		--fullscreen) FULLSCREEN=1 ;;
+		--window)    FULLSCREEN=0 ;;
 		*) echo "unknown option: $a" >&2; exit 1 ;;
 	esac
 done

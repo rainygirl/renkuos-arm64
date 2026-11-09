@@ -95,7 +95,7 @@ OS가 하나도 없는 빈 디스크만 만들어집니다.
 바로 부팅합니다. `--headless`는 창 없이 시리얼 콘솔만 씁니다. 디스크
 (`renku-arm64-vm.img`)는 어느 쪽이든 계속 남습니다.
 
-`--fullscreen`은 전체화면으로 시작합니다(Cmd-F로 전환). 전체화면은 맥북
+기본으로 전체화면으로 시작합니다(Cmd-F로 전환, `--window`는 창으로 시작). 전체화면은 맥북
 카메라 노치 양옆까지 화면 전체를 씁니다. macOS는 QEMU 자체 전체화면을 노치
 아래에 두기 때문에, 스크립트가 `tools/qemu-notch/libqemu-notch.dylib`(첫
 실행 때 빌드)를 주입합니다. QEMU는 그대로 macOS 기본 전체화면(자기 Space,
