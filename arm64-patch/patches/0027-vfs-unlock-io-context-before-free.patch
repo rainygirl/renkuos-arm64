@@ -1,0 +1,48 @@
+Subject: [PATCH] kernel/fs: unlock a new I/O context before freeing it on
+ failure
+
+Since c02707824b ("kernel/fs: Add some more lock assertions"),
+vfs_new_io_context() takes the new context's lock with a WriteLocker for
+the whole function. When vfs_resize_fd_table() fails, the context is
+freed and NULL returned, and only then does the WriteLocker's destructor
+run: it unlocks an rw_lock inside freed memory.
+
+That path is taken when the FD table cannot be allocated, which happens
+under memory pressure -- fork() of a team with a large FD table limit.
+On a RenkuOS arm64 VM running several Chromium processes, with the
+syslog at "low resource memory: critical":
+
+  PANIC: acquire_spinlock(): Failed to acquire spinlock ... (value: deadbeef)
+  acquire_spinlock
+  _rw_lock_write_unlock
+  vfs_new_io_context
+  fork_team
+  syscall_dispatcher
+
+Release the lock, destroy it, and then free the context.
+
+Signed-off-by: rainygirl <rainygirl@gmail.com>
+
+Upstream: https://github.com/RenkuOS/Source (branch fork-io-context-oom, PR pending)
+---
+ src/system/kernel/fs/vfs.cpp | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/src/system/kernel/fs/vfs.cpp b/src/system/kernel/fs/vfs.cpp
+index 2fad5000e9..9688511b94 100644
+--- a/src/system/kernel/fs/vfs.cpp
++++ b/src/system/kernel/fs/vfs.cpp
+@@ -5047,6 +5047,10 @@ vfs_new_io_context(const io_context* parentContext, bool purgeCloseOnExec)
+ 		tableSize = DEFAULT_FD_TABLE_SIZE;
+ 
+ 	if (vfs_resize_fd_table(context, tableSize) != B_OK) {
++		// contextLocker holds the lock inside the context; release it before
++		// the context goes, or its destructor unlocks freed memory.
++		contextLocker.Unlock();
++		rw_lock_destroy(&context->lock);
+ 		free(context);
+ 		return NULL;
+ 	}
+-- 
+2.45.0
+

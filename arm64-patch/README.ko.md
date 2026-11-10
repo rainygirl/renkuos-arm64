@@ -61,7 +61,7 @@ Launching x-vnd.haiku-media_server failed: No such file or directory
 합니다. 부팅도 되고 거기서 설치도 되는 매체를 내놓는 쪽은 이 패치입니다.
 
 
-### 오디오 너머: 0005-0026
+### 오디오 너머: 0005-0027
 
 설치된 arm64 시스템에서 모든 앱을 시험하며 드러난 문제를, 이미지 안에서
 우회하지 않고 이미지 자체에서 고친 것들입니다.
@@ -90,6 +90,7 @@ Launching x-vnd.haiku-media_server failed: No such file or directory
 | `0024-libbe-app-launched-by-exec` | 스크립트가 `exec()`로 실행하는 앱(R Chromium, 웹앱 런처)이 CPU 코어 하나를 계속 썼습니다. roster가 실행한 팀의 루퍼 포트를 만들어 주는데 `exec()`가 그 팀의 포트를 지우고, `BApplication`은 지워진 포트를 그대로 받아 써서 `task_looper()`가 `B_BAD_PORT_ID`로 공회전했습니다. 시작 메시지도 같이 사라져 `ReadyToRun()`도 불리지 않았습니다(이렇게 실행한 DeskCalc는 창이 뜨지 않음). 이제 roster의 포트가 살아 있고 그 팀 소유일 때만 받아 쓰고, 아니면 자기 포트를 쓰면서 `B_ARGV_RECEIVED`와 `B_READY_TO_RUN`을 스스로 보냅니다. |
 | `0025-usb-disk-recover-after-timeout` | VM이 `PANIC: last transaction (853) still open!`으로 커널 디버거에 멈췄습니다. USB 디스크 전송이 10초를 넘기면(호스트가 백그라운드이거나 바빠서 QEMU를 돌리지 못하는 동안 게스트 시계는 계속 감) Bulk-Only 리셋 없이 취소되었고, 장치가 그 뒤 모든 명령에 Stall로 답했으며, 블록 읽기/쓰기는 재시도하지 않아 BFS가 로그를 쓰지 못했습니다. 이제 실패한 전송 뒤에는 항상 리셋하고 READ/WRITE를 네 번까지 재시도합니다. |
 | `0026-vm-free-shadowed-modified-pages` | 메모리가 부족할 때 sshd의 `exec()`에서 `ASSERT FAILED (vm_page.cpp:3172): (page->State() != PAGE_STATE_MODIFIED)`로 VM이 커널 디버거에 멈췄습니다. 업스트림의 장치별 modified 큐 도입 뒤로 MODIFIED 페이지는 캐시에서 빠진 다음에는 해제할 수 없는데, 가려진 페이지를 해제하는 익명 캐시 병합 경로 두 곳(`_MergePagesSmallerConsumer`, `_MergeSwapPages`)이 `_FreePageRange()`와 `Delete()`처럼 먼저 CACHED로 옮기지 않았습니다. 이제 옮깁니다. [RenkuOS/Source#343](https://github.com/RenkuOS/Source/pull/343)으로 제출했습니다. |
+| `0027-vfs-unlock-io-context-before-free` | 메모리가 부족할 때 R Chromium의 `fork()`에서 `acquire_spinlock(): Failed to acquire spinlock ... (value: deadbeef)`로 VM이 커널 디버거에 멈췄습니다. upstream c02707824b 이후 `vfs_new_io_context()`는 새 컨텍스트의 락을 `WriteLocker`로 잡아 두는데, FD 테이블 할당에 실패하면 컨텍스트를 해제하고 반환해서 그 뒤 락커가 해제된 메모리의 락을 풀었습니다. 이제 락을 먼저 풀고 없앤 뒤 해제합니다. |
 
 ## 사용법
 

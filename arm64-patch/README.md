@@ -63,7 +63,7 @@ be booted to a desktop, for the reason given under
 That is the one that yields a medium you can boot *and* install from.
 
 
-### Beyond audio: 0005-0026
+### Beyond audio: 0005-0027
 
 What testing every application on an installed arm64 system turned up, fixed
 in the image rather than worked around in it:
@@ -92,6 +92,7 @@ in the image rather than worked around in it:
 | `0024-libbe-app-launched-by-exec` | Apps launched through a script that `exec()`s them (R Chromium, the web-app launchers) used a whole CPU core. The roster creates the launched team's looper port, `exec()` deletes the team's ports, and `BApplication` adopted the dead port anyway, so `task_looper()` spun on `B_BAD_PORT_ID`. The launch messages went with it, so `ReadyToRun()` never ran either (DeskCalc started that way had no window). It now keeps its own port unless the roster's is alive and owned by the team, and then posts `B_ARGV_RECEIVED` and `B_READY_TO_RUN` to itself. |
 | `0025-usb-disk-recover-after-timeout` | The VM stopped in the kernel debugger with `PANIC: last transaction (853) still open!`. A USB disk transfer that took longer than 10 s (QEMU not run by a backgrounded or busy host while the guest clock went on) was cancelled without a Bulk-Only reset, the device then stalled every later command, and block reads/writes were never retried, so BFS could not write its log. usb_disk now resets after any failed transfer and retries READ/WRITE up to four times. |
 | `0026-vm-free-shadowed-modified-pages` | The VM stopped in the kernel debugger with `ASSERT FAILED (vm_page.cpp:3172): (page->State() != PAGE_STATE_MODIFIED)` from `exec()` in sshd, under memory pressure. Since upstream's per-device modified queues a MODIFIED page cannot be freed once it has left its cache, and the two anonymous-cache merge paths that free shadowed pages (`_MergePagesSmallerConsumer`, `_MergeSwapPages`) did not move it to CACHED first, as `_FreePageRange()` and `Delete()` do. They now do. Submitted as [RenkuOS/Source#343](https://github.com/RenkuOS/Source/pull/343). |
+| `0027-vfs-unlock-io-context-before-free` | The VM stopped in the kernel debugger with `acquire_spinlock(): Failed to acquire spinlock ... (value: deadbeef)` from `fork()` in R Chromium, under memory pressure. Since upstream c02707824b `vfs_new_io_context()` holds the new context's lock in a `WriteLocker`; when the FD table could not be allocated it freed the context and returned, and the locker then unlocked freed memory. It now unlocks and destroys the lock first. |
 
 ## Use
 
