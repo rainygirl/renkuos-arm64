@@ -154,6 +154,29 @@ Settled by hitting the failure, not preference:
   try. A clean guest shutdown also powers QEMU off by itself (PSCI
   power-off, in RenkuOS/Source since 024aeb68a7), so there is no reason to
   force it closed.
+- **A spurious-interrupt storm can freeze the boot before the display ever
+  comes up, host-side, not guest-side.** Serial console fills with
+  `spurious interrupt (1023)` / `Last message repeated N times.` right
+  after `virtio_pci: using legacy interrupt NN` and `register_domain(4,
+  link)`, and the guest never gets further. Confirmed NOT caused by this
+  port's code, any specific disk image or ISO (reproduces on a disk image
+  and ISO copy that have never been booted before), the accelerator (hvf
+  and `--tcg` both hit it), the GIC version, or which devices are attached
+  (reproduces with the network and audio devices removed, and even with
+  `virtio-gpu-pci` replaced by `ramfb` -- i.e. with no virtio-PCI device in
+  the command line at all). It also reproduces on a build and a host that
+  booted cleanly dozens of times earlier the same session, with nothing
+  else about the invocation changed -- this is host QEMU/hvf state
+  degrading over a long session of repeatedly starting and `kill -9`ing
+  qemu-system-aarch64, not anything reachable from inside the guest or
+  this repo. Lower vCPU counts make the race markedly less likely (though
+  not impossible) to trigger; `run-qemu-renku-arm64.sh` itself now runs a
+  boot watchdog that detects this exact pattern in the serial log and
+  retries once at `-smp 2` and once more at `-smp 1` before giving up with
+  a clear error instead of hanging silently -- if even `-smp 1` doesn't
+  clear it (as happened once, confirmed reproducible for a full 90s budget
+  even then), the host itself needs a restart; no combination of QEMU
+  flags tried got past that.
 
 ## Known limitations
 

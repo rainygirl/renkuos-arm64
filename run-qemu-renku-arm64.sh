@@ -138,7 +138,7 @@ fi
 
 if [ ! -f "$DISK" ]; then
 	[ "$INSTALL" = "1" ] || echo "no disk yet at $DISK -- creating an empty one, but it has no OS on it; run with --install first" >&2
-	qemu-img create -f raw "$DISK" 16G
+	qemu-img create -f raw "$DISK" 8G
 fi
 
 FW=""
@@ -224,26 +224,115 @@ echo "screen:   $RES"
 QEMU_BIN="$(command -v qemu-system-aarch64)"
 [ -n "$QEMU_BIN" ] || { echo "qemu-system-aarch64 not found in PATH" >&2; exit 1; }
 
-QEMU_ARGS=(
-	-M virt -cpu "$CPU" -accel "$ACCEL" -smp 4 -m 4096
-	-bios "$FW"
-	-device qemu-xhci,id=usb
-	"${MEDIA[@]}"
-	-device usb-kbd,bus=usb.0
-	-device usb-tablet,bus=usb.0
-	"${NET_ARGS[@]}"
-	-audiodev "${RENKU_AUDIO:-coreaudio}",id=snd0 -device intel-hda -device hda-duplex,audiodev=snd0
-	-qmp unix:"$QMP",server,nowait
-	"${DISPLAY_ARGS[@]}"
-	"${HOLD_ARGS[@]+"${HOLD_ARGS[@]}"}"
-)
+qemu_args_for() {
+	# $1 = vCPU count for this attempt
+	printf '%s\n' \
+		-M virt -cpu "$CPU" -accel "$ACCEL" -smp "$1" -m 4096 \
+		-bios "$FW" \
+		-device qemu-xhci,id=usb
+	printf '%s\n' "${MEDIA[@]}"
+	printf '%s\n' \
+		-device usb-kbd,bus=usb.0 \
+		-device usb-tablet,bus=usb.0
+	printf '%s\n' "${NET_ARGS[@]}"
+	printf '%s\n' \
+		-audiodev "${RENKU_AUDIO:-coreaudio}",id=snd0 -device intel-hda -device hda-duplex,audiodev=snd0 \
+		-qmp unix:"$QMP",server,nowait
+	printf '%s\n' "${DISPLAY_ARGS[@]}"
+	if [ -n "${HOLD_ARGS+set}" ] && [ "${#HOLD_ARGS[@]}" -gt 0 ]; then
+		printf '%s\n' "${HOLD_ARGS[@]}"
+	fi
+	return 0
+}
 
-# --clipboard needs to clean up its background sync loop once qemu exits,
-# which `exec` can't do (it replaces this process, so no trap ever fires).
-# Every other mode keeps using exec -- nothing to clean up, and it passes
-# signals straight through to qemu instead of via a bash wrapper.
+# Launches qemu in the background (not exec'd -- the boot watchdog below
+# needs this script's own process alive to watch serial.log and, if it
+# must, kill and retry) and prints its PID.
+LAST_LAUNCH_PID=""
+launch_qemu() {
+	local args=() line
+	while IFS= read -r line; do args+=("$line"); done < <(qemu_args_for "$1")
+	rm -f "$SERIAL"
+	"${RUNNER[@]+"${RUNNER[@]}"}" "${ENV_ARGS[@]+"${ENV_ARGS[@]}"}" "$QEMU_BIN" "${args[@]}" &
+	LAST_LAUNCH_PID=$!
+}
+
+# A spurious-interrupt storm on the virtio network device's PCI IRQ is a
+# known QEMU/hvf issue on this Mac (not this port's code: reproduces across
+# every disk image, ISO, accelerator and device combination tried -- see
+# AGENTS.md). Its serial-console signature is "Last message repeated" lines
+# arriving back to back without the kernel boot log ever moving past them.
+# Lower vCPU counts make the race far less likely to ever trigger, at the
+# cost of a slower boot, so a hung attempt is retried once at -smp 2 and
+# once more at -smp 1 before giving up. Returns 0 (hang) or 1 (looks fine,
+# or the guest exited on its own -- a real shutdown, not this bug).
+boot_watchdog() {
+	local budget="$1" pid="$2"
+	local elapsed=0 consecutive_repeats=0 stalled_checks=0 last_size=-1 cur_size last_line
+	while [ "$elapsed" -lt "$budget" ]; do
+		if ! kill -0 "$pid" 2>/dev/null; then
+			return 1
+		fi
+		if [ -f "$SERIAL" ]; then
+			cur_size="$(wc -c <"$SERIAL" 2>/dev/null || echo 0)"
+			if [ "$cur_size" = "$last_size" ]; then
+				stalled_checks=$((stalled_checks + 1))
+			else
+				stalled_checks=0
+			fi
+			last_size="$cur_size"
+			last_line="$(tail -n 1 "$SERIAL" 2>/dev/null || true)"
+			case "$last_line" in
+				"Last message repeated"*) consecutive_repeats=$((consecutive_repeats + 1)) ;;
+				*) consecutive_repeats=0 ;;
+			esac
+			if [ "$consecutive_repeats" -ge 4 ]; then
+				return 0
+			fi
+			# Prolonged total silence further into boot than firmware/splash
+			# would normally still be running is the same hang without the
+			# storm (seen under some vCPU/GIC combinations) -- 20s of an
+			# unmoving byte count, itself not checked before 20s in, so a
+			# legitimately slow early stage is never mistaken for it.
+			if [ "$elapsed" -ge 20 ] && [ "$stalled_checks" -ge 20 ]; then
+				return 0
+			fi
+		fi
+		sleep 1
+		elapsed=$((elapsed + 1))
+	done
+	return 1
+}
+
+QEMU_PID=""
+for SMP_TRY in 4 2 1; do
+	[ "$SMP_TRY" = "4" ] || echo "boot watchdog: retrying at -smp $SMP_TRY after a hung attempt (see AGENTS.md's QEMU gotchas)" >&2
+	launch_qemu "$SMP_TRY"
+	TRY_PID="$LAST_LAUNCH_PID"
+	BUDGET=40
+	[ "$SMP_TRY" = "2" ] && BUDGET=60
+	[ "$SMP_TRY" = "1" ] && BUDGET=90
+	if boot_watchdog "$BUDGET" "$TRY_PID"; then
+		echo "boot watchdog: hung at -smp $SMP_TRY, killing and falling back" >&2
+		kill -9 "$TRY_PID" 2>/dev/null || true
+		wait "$TRY_PID" 2>/dev/null || true
+		continue
+	fi
+	QEMU_PID="$TRY_PID"
+	break
+done
+
+if [ -z "$QEMU_PID" ]; then
+	echo "RenkuOS did not boot cleanly even at -smp 1 -- this is the host-side QEMU/hvf issue documented in AGENTS.md, not something a retry here can work around" >&2
+	exit 1
+fi
+
+# --clipboard needs to clean up its background sync loop once qemu exits;
+# every other mode just waits for the PID the watchdog above settled on,
+# propagating its exit status like `exec` used to.
 if [ "$CLIPBOARD" = "0" ]; then
-	exec "${RUNNER[@]+"${RUNNER[@]}"}" "${ENV_ARGS[@]+"${ENV_ARGS[@]}"}" "$QEMU_BIN" "${QEMU_ARGS[@]}"
+	wait "$QEMU_PID"
+	exit $?
 fi
 
 clipboard_sync_loop() {
@@ -296,4 +385,4 @@ cleanup_clipboard() {
 trap cleanup_clipboard EXIT
 echo "clipboard: syncing with the Mac (ssh key: ${RENKU_SSH_KEY:-$HOME/.ssh/id_ed25519})"
 
-"${RUNNER[@]+"${RUNNER[@]}"}" "${ENV_ARGS[@]+"${ENV_ARGS[@]}"}" "$QEMU_BIN" "${QEMU_ARGS[@]}"
+wait "$QEMU_PID"
