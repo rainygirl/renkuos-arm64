@@ -308,7 +308,7 @@ else
 	mkdir -p "$GEN"
 	( cd "$GEN" && ../haiku/configure --build-cross-tools arm64 \
 		--cross-tools-source ../buildtools \
-		--distro-compatibility official --use-gcc-pipe -j"$JOBS" )
+		--distro-compatibility compatible --use-gcc-pipe -j"$JOBS" )
 fi
 
 # ---------------------------------------------------------------------------
