@@ -1,0 +1,42 @@
+Subject: [PATCH] first_boot: wait for initial_volumes_mounted before launching FirstBootPrompt
+
+FirstBootPrompt's language list was empty on a genuinely fresh live
+boot, even with 0029's get_available_languages() fix in place and the
+compiled .catalog files confirmed present on disk (verified by
+inspecting a running desktop session: 33 files under
+/boot/system/data/locale/catalogs/x-vnd.Haiku-FirstBootPrompt/).
+
+The cause is a race, not a missing catalog or a broken scan. data/
+launch/user's top-level `run` block decides between the `first_boot`
+and `desktop` targets unconditionally and immediately -- it has no
+"on" gate. Every other thing that reads from the mounted system
+packages (Tracker, Deskbar, LaunchBox, mail_daemon) is held behind
+`on initial_volumes_mounted` in the `desktop` target; `first_boot`'s
+job was the one exception, with nothing stopping it from starting
+before mount_server's AutoMounter finishes activating the system
+packages. On a live/CD boot, where everything is still being mounted
+off the medium instead of already sitting on an installed disk,
+FirstBootPrompt can win that race and call
+BLocaleRoster::GetAvailableCatalogs() before the package that actually
+provides those catalog files is active -- so the scan isn't wrong, it
+is just looking at a directory that doesn't exist yet.
+
+Add the same `on initial_volumes_mounted` gate the desktop target's
+own services already use, so FirstBootPrompt starts after package
+activation instead of racing it.
+
+diff --git a/data/launch/user b/data/launch/user
+index d15a4d19e3..39b28b872e 100644
+--- a/data/launch/user
++++ b/data/launch/user
+@@ -63,7 +63,9 @@ target desktop {
+ }
+
+ target first_boot {
+-	job x-vnd.Haiku-FirstBootPrompt
++	job x-vnd.Haiku-FirstBootPrompt {
++		on initial_volumes_mounted
++	}
+ }
+
+ target installer {
