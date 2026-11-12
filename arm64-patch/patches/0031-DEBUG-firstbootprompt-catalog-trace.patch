@@ -1,13 +1,13 @@
 Subject: [PATCH] TEMPORARY DEBUG: trace FirstBootPrompt catalog lookup
 
-Not for merging. Prints GetAvailableCatalogs()'s status/count plus a
-direct find_directory+BDirectory scan of the same path to serial, so
-the empty language list can be diagnosed from a live boot's serial
-log without Desktop/Terminal access. Remove once the real cause is
-found.
+Not for merging. stderr from this job never reaches serial.log or
+syslog (launch_daemon jobs have no attached console/log capture), so
+this writes directly to /boot/home/fbp-debug.txt instead -- readable
+from Terminal after clicking through to the desktop. Remove once the
+real cause of the empty language list is found.
 
 diff --git a/src/apps/firstbootprompt/BootPromptWindow.cpp b/src/apps/firstbootprompt/BootPromptWindow.cpp
-index 92f86c5e33..31f8ad0a40 100644
+index 92f86c5e33..351aee4351 100644
 --- a/src/apps/firstbootprompt/BootPromptWindow.cpp
 +++ b/src/apps/firstbootprompt/BootPromptWindow.cpp
 @@ -12,6 +12,7 @@
@@ -18,7 +18,7 @@ index 92f86c5e33..31f8ad0a40 100644
 
  #include <Alert.h>
  #include <Bitmap.h>
-@@ -432,8 +433,25 @@ BootPromptWindow::_PopulateLanguages()
+@@ -432,8 +433,30 @@ BootPromptWindow::_PopulateLanguages()
  	}
 
  	BMessage installedCatalogs;
@@ -26,22 +26,27 @@ index 92f86c5e33..31f8ad0a40 100644
 -		"x-vnd.Haiku-FirstBootPrompt");
 +	status_t fbpDebugStatus = BLocaleRoster::Default()->GetAvailableCatalogs(
 +		&installedCatalogs, "x-vnd.Haiku-FirstBootPrompt");
-+	fprintf(stderr, "FBP-DEBUG: GetAvailableCatalogs status=%s langCount=%d\n",
-+		strerror(fbpDebugStatus), (int)installedCatalogs.CountNames(B_STRING_TYPE));
 +	{
-+		BPath fbpDebugPath;
-+		status_t fdStatus = find_directory(B_SYSTEM_DATA_DIRECTORY, &fbpDebugPath);
-+		fprintf(stderr, "FBP-DEBUG: find_directory(B_SYSTEM_DATA_DIRECTORY)=%s path=%s\n",
-+			strerror(fdStatus), fbpDebugPath.Path());
-+		fbpDebugPath.Append("locale/catalogs/x-vnd.Haiku-FirstBootPrompt");
-+		BDirectory fbpDebugDir(fbpDebugPath.Path());
-+		fprintf(stderr, "FBP-DEBUG: BDirectory(%s).InitCheck=%s\n",
-+			fbpDebugPath.Path(), strerror(fbpDebugDir.InitCheck()));
-+		int32 fbpDebugCount = 0;
-+		BEntry fbpDebugEntry;
-+		while (fbpDebugDir.GetNextEntry(&fbpDebugEntry) == B_OK)
-+			fbpDebugCount++;
-+		fprintf(stderr, "FBP-DEBUG: direct scan found %d entries\n", (int)fbpDebugCount);
++		FILE* fbpDebugFile = fopen("/boot/home/fbp-debug.txt", "a");
++		if (fbpDebugFile != NULL) {
++			fprintf(fbpDebugFile, "FBP-DEBUG: GetAvailableCatalogs status=%s langCount=%d\n",
++				strerror(fbpDebugStatus), (int)installedCatalogs.CountNames(B_STRING_TYPE));
++
++			BPath fbpDebugPath;
++			status_t fdStatus = find_directory(B_SYSTEM_DATA_DIRECTORY, &fbpDebugPath);
++			fprintf(fbpDebugFile, "FBP-DEBUG: find_directory(B_SYSTEM_DATA_DIRECTORY)=%s path=%s\n",
++				strerror(fdStatus), fbpDebugPath.Path());
++			fbpDebugPath.Append("locale/catalogs/x-vnd.Haiku-FirstBootPrompt");
++			BDirectory fbpDebugDir(fbpDebugPath.Path());
++			fprintf(fbpDebugFile, "FBP-DEBUG: BDirectory(%s).InitCheck=%s\n",
++				fbpDebugPath.Path(), strerror(fbpDebugDir.InitCheck()));
++			int32 fbpDebugCount = 0;
++			BEntry fbpDebugEntry;
++			while (fbpDebugDir.GetNextEntry(&fbpDebugEntry) == B_OK)
++				fbpDebugCount++;
++			fprintf(fbpDebugFile, "FBP-DEBUG: direct scan found %d entries\n", (int)fbpDebugCount);
++			fclose(fbpDebugFile);
++		}
 +	}
 
  	BFont font;
