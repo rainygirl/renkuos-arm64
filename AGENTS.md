@@ -178,6 +178,17 @@ Settled by hitting the failure, not preference:
   even then), the host itself needs a restart; no combination of QEMU
   flags tried got past that.
 
+  What actually degraded the host to that point, traced after the fact:
+  dozens of qemu-system-aarch64 launches in a few hours during one
+  investigation, many ended with `pkill -9` instead of a clean shutdown
+  or QMP `quit`. Ordinary use of this port -- one boot, one clean
+  shutdown from inside the guest -- doesn't do that; this is a note for
+  whoever is next at a terminal running repeated manual boot/kill cycles
+  while debugging something, not a warning about normal use. If you're
+  doing that kind of iteration, prefer QMP `quit` or waiting for the
+  guest to exit on its own over `kill -9`, and don't launch the next
+  attempt back-to-back with the last one.
+
 ## Known limitations
 
 **WebPositive plays no HTML5 audio or video.** HaikuWebKit's
