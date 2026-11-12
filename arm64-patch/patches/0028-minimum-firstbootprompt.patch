@@ -1,0 +1,31 @@
+Subject: [PATCH] minimum arm64: offer Installer on first boot
+
+A fresh RENKU arm64 guest booted straight to the desktop from the live
+medium, with no prompt to install -- the README's install steps (run
+DriveSetup, then Installer, by hand from the Deskbar menu) are the only
+way in, and nothing on screen says so.
+
+Haiku already has the machinery for this: data/launch/user's `run`
+job shows FirstBootPrompt (Desktop/Installer buttons) instead of the
+plain desktop when `/system/bin/FirstBootPrompt` exists and the boot
+volume is read-only (true for a live/install medium) or no locale has
+been configured yet. FirstBootPrompt itself was just never added to
+the minimum image -- the regular profile has always shipped it,
+minimum never did, so that `file_exists` check failed and the `run`
+job fell through to the plain desktop every time. Added to minimum's
+SYSTEM_BIN the same way DriveSetup and Installer are already in
+SYSTEM_APPS; no other change needed, the launch condition was already
+there.
+
+diff --git a/build/jam/images/definitions/minimum b/build/jam/images/definitions/minimum
+index 01fc18c38e..58f18c6889 100644
+--- a/build/jam/images/definitions/minimum
++++ b/build/jam/images/definitions/minimum
+@@ -28,6 +28,7 @@ SYSTEM_BIN = [ FFilterByBuildFeatures
+ 	filepanel
+ 	finddir
+ 	findpaths
++	FirstBootPrompt
+ 	fortune
+ 	fstrim
+ 	ftpd
