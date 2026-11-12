@@ -1,39 +1,46 @@
-Subject: [PATCH] first_boot: wait for initial_volumes_mounted before launching FirstBootPrompt
+Subject: [PATCH] first_boot: run SetupEnvironment and wait for volumes before FirstBootPrompt
 
-FirstBootPrompt's language list was empty on a genuinely fresh live
-boot, even with 0029's get_available_languages() fix in place and the
-compiled .catalog files confirmed present on disk (verified by
-inspecting a running desktop session: 33 files under
-/boot/system/data/locale/catalogs/x-vnd.Haiku-FirstBootPrompt/).
+FirstBootPrompt's language list looked empty on a fresh live boot.
+Traced with an instrumented build (write the trace to a file, since
+stderr from a launch_daemon job never reaches serial.log or syslog):
+BLocaleRoster::GetAvailableCatalogs() actually succeeds and the list
+view really does get populated (66 items, i.e. one entry per catalog
+language twice over -- consistent with both the plaintext add-on and
+the embedded default catalog answering) -- so the catalog scan was
+never the problem. Every single item's label was simply the empty
+string: BLanguage::GetNativeName() returned "" for every language,
+while the exact same call via the Locale preflet after reaching the
+desktop returns correct native names for all of them.
 
-The cause is a race, not a missing catalog or a broken scan. data/
-launch/user's top-level `run` block decides between the `first_boot`
-and `desktop` targets unconditionally and immediately -- it has no
-"on" gate. Every other thing that reads from the mounted system
-packages (Tracker, Deskbar, LaunchBox, mail_daemon) is held behind
-`on initial_volumes_mounted` in the `desktop` target; `first_boot`'s
-job was the one exception, with nothing stopping it from starting
-before mount_server's AutoMounter finishes activating the system
-packages. On a live/CD boot, where everything is still being mounted
-off the medium instead of already sitting on an installed disk,
-FirstBootPrompt can win that race and call
-BLocaleRoster::GetAvailableCatalogs() before the package that actually
-provides those catalog files is active -- so the scan isn't wrong, it
-is just looking at a directory that doesn't exist yet.
+The difference is environment, not code. data/launch/user's `desktop`
+target (and the standalone app_server service) both start with
+`env /system/boot/SetupEnvironment`, which is also where the LC_*
+locale environment variables (LC_MESSAGES, LC_CTYPE, ...) get
+exported -- ICU's default locale and its display-name tables are
+driven by exactly those variables. `first_boot`'s job had no such env
+line, so FirstBootPrompt launched with none of that set, and ICU fell
+back to a state where getDisplayName() comes back empty. By the time
+anything in a normal desktop session asks the same question, it's
+running under the `desktop` target and inherits the properly set up
+environment.
 
-Add the same `on initial_volumes_mounted` gate the desktop target's
-own services already use, so FirstBootPrompt starts after package
-activation instead of racing it.
+Give `first_boot` the same `env /system/boot/SetupEnvironment` line
+the `desktop` target already has, and (kept from the first attempt at
+this) gate the job on `on initial_volumes_mounted` like the desktop
+target's own services, so it doesn't start before volumes are mounted
+either.
 
 diff --git a/data/launch/user b/data/launch/user
-index d15a4d19e3..39b28b872e 100644
+index d15a4d19e3..b0ef560292 100644
 --- a/data/launch/user
 +++ b/data/launch/user
-@@ -63,7 +63,9 @@ target desktop {
+@@ -63,7 +63,11 @@ target desktop {
  }
 
  target first_boot {
 -	job x-vnd.Haiku-FirstBootPrompt
++	env /system/boot/SetupEnvironment
++
 +	job x-vnd.Haiku-FirstBootPrompt {
 +		on initial_volumes_mounted
 +	}
