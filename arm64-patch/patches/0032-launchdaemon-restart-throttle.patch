@@ -1,0 +1,174 @@
+Subject: [PATCH] launch_daemon: throttle service respawns
+
+B_SYSTEM_OBJECT_UPDATE's B_TEAM_DELETED handler relaunched a `service`
+job the instant its team died, with a `// TODO: take restart throttle
+into account` left right above the call -- a gap Haiku's own
+launch_daemon authors already knew about, just never closed.
+
+With virtio-net-pci attached under QEMU/hvf (this port's own test
+environment; not reproduced with no network device present), one or
+more of the "legacy" services declared in data/launch/system -- media_server
+and sshd, observed independently of each other -- can exit immediately
+after every launch attempt for reasons that have nothing to do with
+this TODO (that root cause is still open: see AGENTS.md). Without a
+minimum interval between attempts, launch_daemon's own team-deletion
+handler relaunches the job as fast as the kernel can create and tear
+down a team: confirmed via a kernel thread dump showing the job's team
+ID climbing by ~3000 every 5 seconds with the resident team/thread/
+semaphore/port counts and free memory all staying flat (no leak --
+every attempt is cleaned up, just immediately replaced by the next
+one). That respawn storm saturates the CPU in process-creation
+overhead alone and starves the rest of boot of any time to run,
+independent of whatever made the first launch fail.
+
+This gives each Job a timestamp of its last launch attempt (Job::Launch(),
+read back via the new Job::LastLaunchTime()) and, when a service's team
+dies less than a second after that timestamp, defers the relaunch with
+a one-shot BMessageRunner instead of calling _LaunchJob() immediately.
+A service that fails once still recovers within about a second, same as
+before; one that fails repeatedly now retries at roughly 1 Hz instead of
+in a tight loop.
+
+This is upstream launch_daemon code (src/servers/launch/), not something
+this port's own patches otherwise touch -- confirmed, well-contained fix
+regardless of what turns out to be causing the underlying respawn in the
+first place, worth upstreaming.
+
+diff --git a/src/servers/launch/Job.cpp b/src/servers/launch/Job.cpp
+index b696c48674..3b46ec20e1 100644
+--- a/src/servers/launch/Job.cpp
++++ b/src/servers/launch/Job.cpp
+@@ -30,6 +30,7 @@ Job::Job(const char* name)
+ 	fLaunching(false),
+ 	fInitStatus(B_NO_INIT),
+ 	fTeam(-1),
++	fLastLaunchTime(0),
+ 	fDefaultPort(-1),
+ 	fToken((uint32)B_PREFERRED_TOKEN),
+ 	fLaunchStatus(B_NO_INIT),
+@@ -50,6 +51,7 @@ Job::Job(const Job& other)
+ 	fLaunching(other.IsLaunching()),
+ 	fInitStatus(B_NO_INIT),
+ 	fTeam(-1),
++	fLastLaunchTime(0),
+ 	fDefaultPort(-1),
+ 	fToken((uint32)B_PREFERRED_TOKEN),
+ 	fLaunchStatus(B_NO_INIT),
+@@ -306,6 +308,13 @@ Job::Team() const
+ }
+
+
++bigtime_t
++Job::LastLaunchTime() const
++{
++	return fLastLaunchTime;
++}
++
++
+ const PortMap&
+ Job::Ports() const
+ {
+@@ -351,6 +360,8 @@ Job::SetDefaultPort(port_id port)
+ status_t
+ Job::Launch()
+ {
++	fLastLaunchTime = system_time();
++
+ 	// Build environment
+
+ 	std::vector<const char*> environment;
+diff --git a/src/servers/launch/Job.h b/src/servers/launch/Job.h
+index aac20fcae5..7a5cfd602f 100644
+--- a/src/servers/launch/Job.h
++++ b/src/servers/launch/Job.h
+@@ -81,6 +81,8 @@ public:
+
+ 			team_id				Team() const;
+
++			bigtime_t			LastLaunchTime() const;
++
+ 			const PortMap&		Ports() const;
+ 			port_id				Port(const char* name = NULL) const;
+
+@@ -134,6 +136,7 @@ private:
+ 			PortMap				fPortMap;
+ 			status_t			fInitStatus;
+ 			team_id				fTeam;
++			bigtime_t			fLastLaunchTime;
+ 			port_id				fDefaultPort;
+ 			uint32				fToken;
+ 			status_t			fLaunchStatus;
+diff --git a/src/servers/launch/LaunchDaemon.cpp b/src/servers/launch/LaunchDaemon.cpp
+index 5e30134bde..33ee3e56d1 100644
+--- a/src/servers/launch/LaunchDaemon.cpp
++++ b/src/servers/launch/LaunchDaemon.cpp
+@@ -20,6 +20,7 @@
+ #include <driver_settings.h>
+ #include <Entry.h>
+ #include <File.h>
++#include <MessageRunner.h>
+ #include <ObjectList.h>
+ #include <Path.h>
+ #include <PathFinder.h>
+@@ -587,8 +588,26 @@ LaunchDaemon::MessageReceived(BMessage* message)
+ 					status_t status = rosterPrivate.IsShutDownInProgress(
+ 						&inProgress);
+ 					if (status != B_OK || !inProgress) {
+-						// TODO: take restart throttle into account
+-						_LaunchJob(job);
++						// Services that exit again right after being
++						// launched (for example because something they
++						// depend on, like a network link, isn't ready yet)
++						// must not be relaunched as fast as the system can
++						// manage: with no minimum interval between
++						// attempts, a service stuck failing on every
++						// launch starves the rest of the system of CPU
++						// time in a tight respawn loop instead of a few
++						// retries a second.
++						static const bigtime_t kMinRestartInterval = 1000000;
++						bigtime_t elapsed
++							= system_time() - job->LastLaunchTime();
++						if (elapsed >= kMinRestartInterval) {
++							_LaunchJob(job);
++						} else {
++							BMessage restart(kMsgRestartJob);
++							restart.AddString("name", job->Name());
++							BMessageRunner::StartSending(BMessenger(this),
++								&restart, kMinRestartInterval - elapsed, 1);
++						}
+ 					}
+ 				}
+ 			}
+@@ -687,6 +706,20 @@ LaunchDaemon::MessageReceived(BMessage* message)
+ 			_HandleGetLaunchLog(message);
+ 			break;
+
++		case kMsgRestartJob:
++		{
++			// A throttled service restart (see B_SYSTEM_OBJECT_UPDATE
++			// above) is now due.
++			const char* name = message->GetString("name");
++			if (name == NULL)
++				break;
++
++			Job* job = FindJob(name);
++			if (job != NULL && !job->IsRunning())
++				_LaunchJob(job);
++			break;
++		}
++
+ 		case kMsgEventTriggered:
+ 		{
+ 			// An internal event has been triggered.
+diff --git a/src/servers/launch/LaunchDaemon.h b/src/servers/launch/LaunchDaemon.h
+index ace8a9fbbc..44e153d654 100644
+--- a/src/servers/launch/LaunchDaemon.h
++++ b/src/servers/launch/LaunchDaemon.h
+@@ -10,6 +10,7 @@
+
+
+ static const uint32 kMsgEventTriggered = 'ldet';
++static const uint32 kMsgRestartJob = 'ldrj';
+
+
+ #endif // LAUNCH_DAEMON_H

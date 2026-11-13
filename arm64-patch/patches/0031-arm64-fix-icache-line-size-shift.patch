@@ -1,0 +1,52 @@
+Subject: [PATCH] arm64: fix the icache line size shift in arch_cpu_sync_icache
+
+arch_cpu_sync_icache() reads CTR_EL0 and is supposed to pull IminLine out
+of bits [3:0] with `ctr_el0 & 0xF` -- the same way it correctly pulls
+DminLine out of bits [19:16] two lines below with `(ctr_el0 >> 16) & 0xF`,
+and the same way compiler-rt's __clear_cache (which this function's
+commit message says it was derived from) computes it. Instead it does
+`ctr_el0 << 0xF`, shifting CTR_EL0 itself left by 15 instead of masking
+its low 4 bits.
+
+`4 << (ctr_el0 << 0xF)` shifts `int` by a change-of-register amount that
+is well past the width of the type, which is undefined behavior in C++
+and compiles to whatever the `lsl` instruction happens to do with a huge
+shift-amount register -- not a fixed wrong constant, so the resulting
+icache_line_size can come out as 0. When it does, the invalidation loop
+
+    for (uint64_t address_icache = ROUNDDOWN(addr, icache_line_size);
+         address_icache < end; address_icache += icache_line_size) {
+
+never advances and spins forever at 100% CPU, which is exactly what
+every path that calls arch_cpu_sync_icache() after writing executable
+pages (module/driver loading, runtime_loader, the kernel debugger's
+breakpoint patching) runs into. Confirmed by sampling the stuck vCPU's
+PC in a tight loop under QEMU/hvf -- it kept landing inside this
+function, specifically in the icache invalidation loop -- right after
+the exact point in boot where a kernel module gets loaded (observed
+with the ethernet drivers, but any module load hits the same path).
+Whether a given run hangs depends on the exact bit pattern QEMU's
+emulated CTR_EL0 produces for this build, which is also why this has
+been intermittent rather than a guaranteed hang on every boot.
+
+This is upstream Haiku arm64 code (src/system/kernel/arch/arm64/arch_cpu.cpp,
+introduced in 6bcb56f62dfd20138ddc4194972f6eec7101800d, "arm64: Implement
+icache synchronization to match documentation"), not something this
+port's own patches touch -- it affects any arm64 Haiku boot where
+CTR_EL0's IminLine field happens to produce a shift-amount-mod-bit-width
+of 0 after being left-shifted by 15, not just this port's QEMU test
+environment. Worth upstreaming once confirmed fixed here.
+
+diff --git a/src/system/kernel/arch/arm64/arch_cpu.cpp b/src/system/kernel/arch/arm64/arch_cpu.cpp
+index b1ac3478a6..a3a932d1b0 100644
+--- a/src/system/kernel/arch/arm64/arch_cpu.cpp
++++ b/src/system/kernel/arch/arm64/arch_cpu.cpp
+@@ -104,7 +104,7 @@ arch_cpu_sync_icache(void *address, size_t len)
+ 	uint64_t ctr_el0 = 0;
+ 	asm volatile ("mrs\t%0, ctr_el0":"=r" (ctr_el0));
+
+-	uint64_t icache_line_size = 4 << (ctr_el0 << 0xF);
++	uint64_t icache_line_size = 4 << (ctr_el0 & 0xF);
+ 	uint64_t dcache_line_size = 4 << ((ctr_el0 >> 16) & 0xF);
+ 	uint64_t addr = (uint64_t)address;
+ 	uint64_t end = addr + len;

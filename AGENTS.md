@@ -189,6 +189,63 @@ Settled by hitting the failure, not preference:
   guest to exit on its own over `kill -9`, and don't launch the next
   attempt back-to-back with the last one.
 
+- **Most of what looked like "the host/hvf degraded" above turned out to
+  be a real, fixed bug: `0031-arm64-fix-icache-line-size-shift`.**
+  `arch_cpu_sync_icache()` (upstream `src/system/kernel/arch/arm64/arch_cpu.cpp`,
+  not this port's own code) computed the icache invalidation line size
+  with `ctr_el0 << 0xF` instead of `ctr_el0 & 0xF`; depending on the exact
+  `CTR_EL0` bits QEMU hands the guest, that can compile to a line size of
+  0, which turns the invalidation loop right below it into one that never
+  advances -- 100% CPU, forever, the instant any module or driver gets
+  its code pages written and synced (confirmed by sampling the stuck
+  vCPU's PC with QMP `info registers` across dozens of boots: it kept
+  landing inside this exact loop). This explains why the symptom above
+  reproduced with every accelerator, every GIC version, every device
+  combination, and even on builds that had booted cleanly earlier the
+  same session: none of those ever mattered, because any boot that got
+  far enough to load a second module could hit it depending on nothing
+  but that one register's bit pattern. Fixed; confirmed fixed by
+  rebuilding with the patch and reaching FirstBootPrompt repeatedly where
+  it previously hung every time.
+
+- **A network device can deadlock launch_daemon's registrar bootstrap --
+  separate bug, still open.** With a real NIC attached (confirmed with
+  both `virtio-net-pci` and `e1000`; confirmed under both hvf and `--tcg`,
+  so not an accelerator-timing issue) and DHCP completing successfully in
+  under a millisecond (confirmed with QEMU's own `-object filter-dump`
+  packet capture -- this is not a DHCP problem), boot can still hang
+  forever right after `register_domain(4, link)`, idle (not spinning --
+  confirmed via QMP PC sampling and `info registers`, and via
+  `get_system_info()`: sems/ports/threads/teams/free memory all stay
+  completely flat for minutes, so it is not a resource leak either).
+  Traced with a kernel thread dump plus targeted `debug_printf` tracing
+  (both temporary, not committed) to an exact, reproducible point:
+  `LaunchDaemon`'s single job-queue worker thread is permanently blocked
+  inside `Job::_Launch()`'s call to `BRoster::Private().Launch()` --
+  specifically while launching the `registrar` job itself, which
+  `launch_daemon`'s own bookkeeping shows stuck at `launching=1,
+  running=0` (never reaches `running`). Every later service launch goes
+  through the same registrar IPC round-trip, so once this one call never
+  returns, nothing else `launch_daemon` is responsible for can start
+  either -- which is why `media_server` and (independently, with
+  `media_server` disabled instead) `sshd` were the ones seen crash-looping
+  before `0032-launchdaemon-restart-throttle` made that loop stop
+  consuming all the CPU: both are plain bystanders repeatedly failing
+  `_CanLaunchJob()`'s `IsRunning()`/`IsLaunching()` checks on a daemon that
+  can no longer process anything, not services with their own bugs.
+  Reaching this point took a full session; what's still open is *why*
+  `registrar`'s own bootstrap through that exact IPC call blocks
+  specifically when a NIC is present -- confirmed not resource exhaustion,
+  not any one service's fault, not the accelerator, and (unlike the
+  `0031` bug) not something `info registers` PC sampling alone resolves,
+  since the blocked thread sits in a semaphore wait, not a spin. Next
+  step for whoever picks this up: trace `BRoster::_LaunchApp()` ->
+  `_AddApplication()` (`src/kits/app/Roster.cpp`) and whatever on the
+  `registrar` team's side is supposed to answer that message but
+  apparently never gets there, plus check whether `fNoRegistrar`'s handling
+  of the registrar's own self-launch is actually exercised the same way
+  with a NIC attached as without one.
+
 ## Known limitations
 
 **WebPositive plays no HTML5 audio or video.** HaikuWebKit's
