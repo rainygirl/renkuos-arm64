@@ -55,8 +55,10 @@
 #     recording app, once that permission is granted.
 #
 # Bridged networking (--bridged):
-#   The default NIC is QEMU usermode NAT (hostfwd tcp::2222-:22) -- the guest
-#   is only reachable from this Mac, never from other machines on the LAN.
+#   The default NIC is QEMU usermode NAT (hostfwd tcp:127.0.0.1:2222-:22) --
+#   the guest is only reachable from this Mac, never from other machines on
+#   the LAN. (The forward used to listen on every interface, which put the
+#   guest's sshd on the LAN after all; it is bound to loopback now.)
 #   --bridged adds a SECOND NIC on vmnet-bridged, which puts the guest
 #   directly on the real network with its own DHCP-assigned IP, reachable
 #   from any machine on the LAN (sshd already runs at boot -- see AGENTS.md).
@@ -107,7 +109,9 @@
 #   The guest's boot volume shows up on the Mac as a network volume named
 #   RenkuOS (Finder > Locations), read-write, with no login. The guest serves
 #   it over WebDAV (renku_webdavd, arm64-patch 0047) on port 2280, forwarded
-#   to 127.0.0.1:2280 here only -- never the LAN -- and this script mounts it
+#   to 127.0.0.1:2280 here only -- never the LAN -- and answering only
+#   requests addressed to 127.0.0.1/localhost, so a web page that rebinds its
+#   own name to 127.0.0.1 can't reach it either; this script mounts it
 #   with `mount_webdav -S` once the guest answers, then unmounts it when QEMU
 #   exits. Not through Finder's own "Connect to Server" path (`mount volume`
 #   / NetFS): that pops a "connect as" login dialog for 127.0.0.1 even though
@@ -149,7 +153,7 @@ done
 # trying to clean up across privilege levels.
 QMP="/tmp/renku-arm64.qmp"
 SERIAL="$DIR/serial.log"
-NET_ARGS=(-netdev user,id=n0,hostfwd=tcp::2222-:22 -device virtio-net-pci,netdev=n0)
+NET_ARGS=(-netdev user,id=n0,hostfwd=tcp:127.0.0.1:2222-:22 -device virtio-net-pci,netdev=n0)
 SHARE="${RENKU_SHARE:-1}"
 SHARE_PORT="${RENKU_SHARE_PORT:-2280}"
 SHARE_URL="http://127.0.0.1:$SHARE_PORT/RenkuOS/"

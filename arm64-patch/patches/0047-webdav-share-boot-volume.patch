@@ -18,6 +18,11 @@ advertises DAV class 2; locks are granted, not enforced.
   (where QEMU usermode networking delivers a hostfwd'ed connection) and
   127.0.0.1. With --bridged the guest is also on the real LAN, which would
   otherwise get read-write access to the whole volume.
+- It only answers requests whose Host is 127.0.0.1, localhost or [::1]
+  (what mount_webdav sends). To the guest every request from the Mac
+  comes from 10.0.2.2, so the peer check cannot tell a web page in the
+  Mac's browser that rebinds its own name to 127.0.0.1 (DNS rebinding)
+  from the mount; the name that page's requests carry can.
 - The share is /RenkuOS/ -> /boot; the last path component is what macOS
   names the volume.
 - macOS writes AppleDouble "._name" files (extended attributes, including
@@ -81,10 +86,10 @@ index 453de83cc9..46ff916bd9 100644
  	mountvolume.cpp
 diff --git a/src/bin/renku_webdavd.cpp b/src/bin/renku_webdavd.cpp
 new file mode 100644
-index 0000000000..7574bb4143
+index 0000000000..372fc9ab4a
 --- /dev/null
 +++ b/src/bin/renku_webdavd.cpp
-@@ -0,0 +1,1264 @@
+@@ -0,0 +1,1291 @@
 +/*
 + * renku_webdavd -- serves the boot volume over WebDAV so the Mac running this
 + * guest under QEMU can mount it as a network volume (Finder > Locations).
@@ -1193,6 +1198,28 @@ index 0000000000..7574bb4143
 +}
 +
 +
++// The Host a request names must be the loopback address the Mac mounts
++// through (any port). A web page that rebinds its own name to 127.0.0.1 gets
++// the browser to treat this server as same-origin, but its requests still
++// carry that name -- so this is what keeps the share out of reach of web
++// pages, which the peer check alone cannot: to the guest, every request from
++// the Mac comes from 10.0.2.2.
++static bool
++host_allowed(const string& header)
++{
++	string host = lower(header);
++	if (!host.empty() && host[0] == '[') {
++		size_t end = host.find(']');
++		host = end == string::npos ? "" : host.substr(0, end + 1);
++	} else {
++		size_t colon = host.find(':');
++		if (colon != string::npos)
++			host.erase(colon);
++	}
++	return host == "127.0.0.1" || host == "localhost" || host == "[::1]";
++}
++
++
 +static void
 +handle(Connection& c, const Request& r)
 +{
@@ -1203,6 +1230,11 @@ index 0000000000..7574bb4143
 +				i != r.headers.end(); i++)
 +			fprintf(stderr, " [%s: %s]", i->first.c_str(), i->second.c_str());
 +		fprintf(stderr, "\n");
++	}
++	if (!host_allowed(r.Header("host"))) {
++		c.keepAlive = false;
++		c.Respond(403);
++		return;
 +	}
 +	string path;
 +	if (!share_path(r.target, path)) {
