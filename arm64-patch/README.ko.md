@@ -61,7 +61,7 @@ Launching x-vnd.haiku-media_server failed: No such file or directory
 합니다. 부팅도 되고 거기서 설치도 되는 매체를 내놓는 쪽은 이 패치입니다.
 
 
-### 오디오 너머: 0005-0045
+### 오디오 너머: 0005-0046
 
 설치된 arm64 시스템에서 모든 앱을 시험하며 드러난 문제를, 이미지 안에서
 우회하지 않고 이미지 자체에서 고친 것들입니다.
@@ -106,6 +106,7 @@ Launching x-vnd.haiku-media_server failed: No such file or directory
 | `0043-live-image-no-installer` | 라이브 매체(`RENKU_LIVE_BUILD=1`)는 매체에서 바로 실행되는 게 전제라서 — 거기선 설치할 게 없습니다. 같은 jam 변수로 게이트해서 `Installer`를 `SYSTEM_APPS`와 `DESKBAR_APPLICATIONS` 양쪽에서 걸러냅니다. `data/launch/user`의 `create-installer-link` job(읽기전용/라이브 부팅에서 데스크탑에 Installer 바로가기를 만드는 job)은 이미 `file_exists /boot/system/apps/Installer`로 게이트되어 있어서, 바이너리를 빼는 것만으로도 그 바로가기가 안 생기게 하는 데 충분합니다 — 거기는 따로 손댈 게 없습니다. |
 | `0044-live-image-skip-firstboot` | `0043`으로도 FirstBootPrompt의 Install/Try it out 화면 자체는 매번 라이브 부팅 때마다 그대로 떴습니다(`data/launch/user`의 `run` job은 매체가 읽기전용인지로 이 화면을 띄울지 정하는데, 라이브 매체는 항상 읽기전용입니다) — 바이너리가 사라졌으니 "Install"은 눌러도 실패하는 죽은 버튼이 되고요(`FirstBootPromptWindow`는 Installer가 실제로 있는지 확인하지 않고 그 버튼을 무조건 그립니다). `run`의 조건은 `/system/bin/FirstBootPrompt`가 있을 때만 `first_boot`로 들어가므로, `RENKU_LIVE_BUILD=1`일 때 `SYSTEM_BIN`에서 그걸 걸러내는 것만으로 — `0043`과 같은 방식 — `data/launch/user`를 따로 안 고쳐도 라이브 매체가 바로 데스크탑으로 부팅되게 할 수 있습니다. |
 | `0045-boot-splash-logo` | `app_server`가 뜨기 전까지는 QEMU 창에 보여줄 게 없습니다 — EDK2/EFI 부트로더가 virtio-gpu에 아직 아무것도 그리지 않은 상태라, 그동안은 cocoa 디스플레이 자신의 "Display output is not active" 플레이스홀더만 보입니다. RenkuOS/Source 자신의 부트로더는 이미 그 공백 구간에 로고를 그리게 돼 있지만(`video_display_splash()`, `default` 빌드에 이미 연결돼 있음) 372x96 이미지가 비어있는 채로 컴파일돼 있었습니다 — 상표 미포함 빌드에서 Haiku 로고를 뺀 뒤 RenkuOS 것으로 대체하지 않았기 때문입니다. [`renkuos-logopatch`](../renkuos-logopatch/)에서 그대로 가져왔습니다(같은 고정 커밋 기준으로 생성됨): `headers/private/kernel/boot/images.h`의 고대비 RenkuOS 워드마크만 바꾸고 나머지는 그대로입니다. arm64 전용 수정은 아닙니다 — 업스트림에서는 어느 아키텍처든 이렇게 비어있습니다 — 하지만 이 이미지의 부팅 과정 중 RenkuOS 브랜딩이 전혀 안 보이는 유일한 순간이라 포함해 둘 가치가 있습니다. |
+| `0046-live-disk-grow-boot-volume` | 라이브 매체의 `/boot`는 이미지 안의 300 MiB BFS 파티션 그대로라, 바깥 디스크가 아무리 커도 300 MiB(여유 약 10 MiB)에 머물렀습니다. R Chromium의 공유 메모리가 이 볼륨의 `/tmp`에 만들어져 큰 화면 한 장에도 모자랄 정도였습니다. 이미지를 키우면 그만큼 다운로드가 커지므로, `run-qemu-renku-arm64.sh --live`가 qcow2 overlay의 가상 크기를 16 GiB로 잡고(쓰기 전에는 공간을 차지하지 않음) 게스트가 그 안으로 커집니다. 첫 로그인 때 `data/launch/user`의 `renku-grow-boot` 작업이 새 도구 `renku_grow_boot --restart`(`src/bin`)를 실행합니다. 라이브 디스크 구조(ISO 9660 하이브리드, MBR에 BFS와 그 바로 뒤 ESP만 있음)일 때만 ESP를 디스크 끝으로 복사·검증하고, BFS 파티션을 그 앞까지 늘리고, `~/config/settings/kernel/drivers/bfs`에 `grow_to_partition true`를 쓴 뒤 안내창을 띄우고 재시작합니다. 재시작 때 BFS의 `Volume::Mount()`가 저널·캐시·할당기를 시작하기 전에 파일 시스템을 키웁니다(`_GrowToPartition`). BFS는 원래 크기를 바꿀 수 없습니다(`ResizeVisitor`는 껍데기). BFS는 저널 끝까지를 예약 영역으로 보므로 저널 끝은 그대로 두고, 커진 비트맵이 저널 앞부분을 가져갑니다(16 GiB 기준 2048 -> 1546블록). 다른 데이터는 옮기지 않습니다. 저널이 깨끗해야 하며, 예상과 다른 구조면 볼륨을 그대로 둡니다. 새 16 GiB overlay에서 확인: 첫 로그인 안내창, `bfs: grew "Haiku" from 153600 to 8385024 blocks`, `/boot` 16.0 GiB, `checkfs` 정상. 하면서 찾은 것: minimum 이미지 정의 끝에서 `system boot`에 넣는 파일은 이 이미지에 들어가지 않습니다. 0041의 `renku-install-rchromium` 스크립트가 이미지에 없는 것도 같은 이유입니다. |
 
 ## 어떤 패치가 RenkuOS/Source PR 후보인가
 
