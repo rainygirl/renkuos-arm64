@@ -21,6 +21,7 @@ When asked to "boot it", "run it", or "start QEMU":
 ```sh
 ./run-qemu-renku-arm64.sh                # boot the installed disk, in a window
 ./run-qemu-renku-arm64.sh --install      # boot the ISO with the disk attached
+./run-qemu-renku-arm64.sh --live         # boot renku-arm64-live.iso alone (what MacRenkuOS runs)
 ./run-qemu-renku-arm64.sh --headless     # no window
 ./run-qemu-renku-arm64.sh --bridged      # add a LAN-reachable NIC (needs sudo)
 ./run-qemu-renku-arm64.sh --clipboard    # sync the Mac's clipboard with the guest's
@@ -37,7 +38,7 @@ clear error. The disk (`renku-arm64-vm.img`) persists between runs.
 
 ## The patch
 
-`arm64-patch/patches/` is 19 patches against RenkuOS/Source, applied by
+`arm64-patch/patches/` is the patch set (0001-0047) against RenkuOS/Source, applied by
 `build-renku-arm64-iso.sh`. What each one changes and why is documented
 file-by-file in [`arm64-patch/README.md`](arm64-patch/README.md) -- this
 section only summarizes the shape of it.
@@ -347,8 +348,9 @@ Settled by hitting the failure, not preference:
   many seconds a boot already takes or the 30 s fallback this mechanism
   already tolerates if full screen is never reached at all. Confirmed
   fixed: 5 of 5 trials at the real crash resolution through the exact,
-  unmodified `--fullscreen` path, plus the real `MacRenkuOS.app` itself
-  relaunched end to end on the real target Mac.
+  unmodified `--fullscreen` path, plus the real MacRenkuOS launcher itself
+  (then an .app, now the `renkuos` command -- same `run-qemu-renku-arm64.sh`
+  path) relaunched end to end on the real target Mac.
 
   Both are upstream/this-port's-own-tooling issues respectively (the
   virtio_gpu one is upstream Haiku kernel code and worth upstreaming;
@@ -404,7 +406,7 @@ reinvestigating here.)
   the very first live boot -- before Installer ever opens -- not only
   after a later package install.
 - **Retina/HiDPI detection** (0037-0040): confirmed on the real target Mac
-  (a 13" MacBook Air) through the actual `MacRenkuOS.app` launch path --
+  (a 13" MacBook Air) through the actual MacRenkuOS launch path --
   `virtio_gpu_get_edid_info()` read the panel as 29x18 cm at 2560x1664
   (≈224 dpi), which `Desktop::_AutomaticUIScale()` turns into 2x, the
   right scale for that panel -- with no crash and a full boot to a

@@ -1,0 +1,1351 @@
+Subject: [PATCH] renku_webdavd: the boot volume as a WebDAV share for the Mac host
+
+run-qemu-renku-arm64.sh (and so MacRenkuOS's `renkuos`) mounts the guest's
+/boot on the Mac, where Finder lists it under Locations like any network
+volume. QEMU's cocoa display has no shared-folder channel and Haiku has no
+virtio-9p/virtiofs driver, and the one network file protocol macOS mounts
+read-write with nothing to install, no root and no dialog is WebDAV
+(mount_webdav -S) -- so the guest serves one.
+
+renku_webdavd is a small threaded HTTP/1.1 server (POSIX + libnetwork
+only) implementing what macOS's webdavfs needs to mount read-write:
+OPTIONS, PROPFIND (depth 0/1), GET/HEAD with single ranges, PUT (including
+chunked bodies), MKCOL, DELETE, COPY, MOVE, PROPPATCH (accepted, not
+stored) and LOCK/UNLOCK -- webdavfs mounts read-only unless the server
+advertises DAV class 2; locks are granted, not enforced.
+
+- It listens on port 2280 and only accepts connections from 10.0.2.2
+  (where QEMU usermode networking delivers a hostfwd'ed connection) and
+  127.0.0.1. With --bridged the guest is also on the real LAN, which would
+  otherwise get read-write access to the whole volume.
+- The share is /RenkuOS/ -> /boot; the last path component is what macOS
+  names the volume.
+- macOS writes AppleDouble "._name" files (extended attributes, including
+  the com.apple.provenance/quarantine nearly every file carries) and
+  .DS_Store next to everything it copies. Those are held in memory instead
+  of being written into the guest's folders.
+- macOS sends file names decomposed (Hangul NFD); they are stored composed
+  (NFC), the form Haiku itself and its input method produce, so a folder
+  named in Korean from the Mac shows correctly in Tracker.
+
+Started by a launch_daemon service in data/launch/system, through
+`sh -c "exec ..."` for the same reason sshd is (0016).
+
+diff --git a/build/jam/images/definitions/minimum b/build/jam/images/definitions/minimum
+index 967f876a2c..2a2e906726 100644
+--- a/build/jam/images/definitions/minimum
++++ b/build/jam/images/definitions/minimum
+@@ -87,6 +87,7 @@ SYSTEM_BIN = [ FFilterByBuildFeatures
+ 	release
+ 	renice
+ 	renku_grow_boot
++	renku_webdavd
+ 	resattr
+ 	resizefs
+ 	rmattr
+diff --git a/data/launch/system b/data/launch/system
+index d98c711fce..e49fd51531 100644
+--- a/data/launch/system
++++ b/data/launch/system
+@@ -61,6 +61,15 @@ service x-vnd.Haiku-power_daemon {
+ 	legacy
+ }
+ 
++service x-vnd.Renku-webdavd {
++	# The boot volume as a WebDAV share, for the Mac running this guest
++	# under QEMU (run-qemu-renku-arm64.sh mounts it in Finder). Only the
++	# QEMU host may connect; see src/bin/renku_webdavd.cpp. Launched
++	# through sh -c for the same reason as sshd (data/launch/sshd).
++	launch /bin/sh -c "exec /bin/renku_webdavd"
++	no_safemode
++}
++
+ job x-vnd.Haiku-cddb_lookup {
+ 	launch /system/bin/cddb_lookup
+ 	no_safemode
+diff --git a/src/bin/Jamfile b/src/bin/Jamfile
+index 453de83cc9..46ff916bd9 100644
+--- a/src/bin/Jamfile
++++ b/src/bin/Jamfile
+@@ -163,6 +163,11 @@ StdBinCommands
+ 	xres.cpp
+ 	: be [ TargetLibstdc++ ] : $(haiku-utils_rsrc) ;
+ 
++# commands that need libnetwork.so, libstdc++.so
++StdBinCommands
++	renku_webdavd.cpp
++	: network [ TargetLibstdc++ ] : $(haiku-utils_rsrc) ;
++
+ # Haiku-specific apps which need libbe.so, libstdc++.so
+ StdBinCommands
+ 	mountvolume.cpp
+diff --git a/src/bin/renku_webdavd.cpp b/src/bin/renku_webdavd.cpp
+new file mode 100644
+index 0000000000..7574bb4143
+--- /dev/null
++++ b/src/bin/renku_webdavd.cpp
+@@ -0,0 +1,1264 @@
++/*
++ * renku_webdavd -- serves the boot volume over WebDAV so the Mac running this
++ * guest under QEMU can mount it as a network volume (Finder > Locations).
++ *
++ *   renku_webdavd [-p port] [-r root] [-n share-name] [-a] [-v]
++ *
++ * Only the QEMU host may connect: QEMU's usermode network hands a hostfwd'ed
++ * connection to the guest from 10.0.2.2, and 127.0.0.1 is allowed for testing
++ * inside the guest; -a lifts that (with --bridged, the LAN would otherwise
++ * get read-write access to the whole volume).
++ *
++ * Enough of RFC 4918 for macOS's webdavfs to mount it read-write: OPTIONS,
++ * PROPFIND (depth 0/1), GET/HEAD (single ranges), PUT (also chunked), MKCOL,
++ * DELETE, COPY, MOVE, PROPPATCH (accepted, not stored) and LOCK/UNLOCK
++ * (class 2 is what makes webdavfs mount read-write; locks are not enforced).
++ *
++ * macOS litters every volume it writes to with AppleDouble "._*" files and
++ * ".DS_Store"; those are kept in memory instead of on the guest's disk.
++ * Names arriving in Hangul NFD (what macOS sends) are stored composed (NFC),
++ * the form Haiku itself uses.
++ */
++
++#include <arpa/inet.h>
++#include <dirent.h>
++#include <errno.h>
++#include <fcntl.h>
++#include <netinet/in.h>
++#include <netinet/tcp.h>
++#include <pthread.h>
++#include <signal.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <strings.h>
++#include <sys/socket.h>
++#include <sys/stat.h>
++#include <sys/statvfs.h>
++#include <sys/time.h>
++#include <time.h>
++#include <unistd.h>
++
++#include <map>
++#include <string>
++#include <vector>
++
++using std::string;
++
++static string gRoot = "/boot";
++static string gShare = "RenkuOS";
++static bool gAnyPeer = false;
++static bool gVerbose = false;
++
++static pthread_mutex_t gLock = PTHREAD_MUTEX_INITIALIZER;
++static std::map<string, string> gShadow;	// url path -> contents
++static std::map<string, time_t> gShadowTime;
++static unsigned long gLockCounter = 0;
++
++
++// #pragma mark - strings
++
++
++static string
++lower(string s)
++{
++	for (size_t i = 0; i < s.size(); i++)
++		s[i] = tolower((unsigned char)s[i]);
++	return s;
++}
++
++
++static string
++trim(const string& s)
++{
++	size_t a = s.find_first_not_of(" \t");
++	if (a == string::npos)
++		return "";
++	size_t b = s.find_last_not_of(" \t\r");
++	return s.substr(a, b - a + 1);
++}
++
++
++static string
++url_decode(const string& s)
++{
++	string out;
++	for (size_t i = 0; i < s.size(); i++) {
++		if (s[i] == '%' && i + 2 < s.size() && isxdigit((unsigned char)s[i + 1])
++			&& isxdigit((unsigned char)s[i + 2])) {
++			out += (char)strtol(s.substr(i + 1, 2).c_str(), NULL, 16);
++			i += 2;
++		} else
++			out += s[i];
++	}
++	return out;
++}
++
++
++static string
++url_encode(const string& s)
++{
++	static const char* hex = "0123456789ABCDEF";
++	string out;
++	for (size_t i = 0; i < s.size(); i++) {
++		unsigned char c = s[i];
++		if (isalnum(c) || strchr("/-_.~", c) != NULL)
++			out += c;
++		else {
++			out += '%';
++			out += hex[c >> 4];
++			out += hex[c & 15];
++		}
++	}
++	return out;
++}
++
++
++static string
++xml_escape(const string& s)
++{
++	string out;
++	for (size_t i = 0; i < s.size(); i++) {
++		switch (s[i]) {
++			case '<': out += "&lt;"; break;
++			case '>': out += "&gt;"; break;
++			case '&': out += "&amp;"; break;
++			case '"': out += "&quot;"; break;
++			default: out += s[i];
++		}
++	}
++	return out;
++}
++
++
++// Composes Hangul jamo sequences (NFD, as macOS sends file names) into
++// precomposed syllables. Everything else passes through untouched.
++static string
++hangul_nfc(const string& s)
++{
++	std::vector<uint32_t> cps;
++	for (size_t i = 0; i < s.size();) {
++		unsigned char c = s[i];
++		uint32_t cp;
++		int n;
++		if (c < 0x80) { cp = c; n = 1; }
++		else if ((c >> 5) == 6) { cp = c & 0x1f; n = 2; }
++		else if ((c >> 4) == 14) { cp = c & 0x0f; n = 3; }
++		else if ((c >> 3) == 30) { cp = c & 0x07; n = 4; }
++		else
++			return s;
++		if (i + n > s.size())
++			return s;
++		for (int k = 1; k < n; k++)
++			cp = (cp << 6) | (s[i + k] & 0x3f);
++		cps.push_back(cp);
++		i += n;
++	}
++
++	std::vector<uint32_t> out;
++	for (size_t i = 0; i < cps.size(); i++) {
++		uint32_t cp = cps[i];
++		if (!out.empty()) {
++			uint32_t last = out.back();
++			if (last >= 0x1100 && last <= 0x1112 && cp >= 0x1161 && cp <= 0x1175) {
++				out.back() = 0xAC00 + ((last - 0x1100) * 21 + (cp - 0x1161)) * 28;
++				continue;
++			}
++			if (last >= 0xAC00 && last <= 0xD7A3 && (last - 0xAC00) % 28 == 0
++				&& cp >= 0x11A8 && cp <= 0x11C2) {
++				out.back() = last + (cp - 0x11A7);
++				continue;
++			}
++		}
++		out.push_back(cp);
++	}
++
++	string r;
++	for (size_t i = 0; i < out.size(); i++) {
++		uint32_t cp = out[i];
++		if (cp < 0x80)
++			r += (char)cp;
++		else if (cp < 0x800) {
++			r += (char)(0xC0 | (cp >> 6));
++			r += (char)(0x80 | (cp & 0x3f));
++		} else if (cp < 0x10000) {
++			r += (char)(0xE0 | (cp >> 12));
++			r += (char)(0x80 | ((cp >> 6) & 0x3f));
++			r += (char)(0x80 | (cp & 0x3f));
++		} else {
++			r += (char)(0xF0 | (cp >> 18));
++			r += (char)(0x80 | ((cp >> 12) & 0x3f));
++			r += (char)(0x80 | ((cp >> 6) & 0x3f));
++			r += (char)(0x80 | (cp & 0x3f));
++		}
++	}
++	return r;
++}
++
++
++static string
++http_date(time_t t)
++{
++	char buf[64];
++	struct tm tm;
++	gmtime_r(&t, &tm);
++	strftime(buf, sizeof(buf), "%a, %d %b %Y %H:%M:%S GMT", &tm);
++	return buf;
++}
++
++
++static string
++iso_date(time_t t)
++{
++	char buf[64];
++	struct tm tm;
++	gmtime_r(&t, &tm);
++	strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tm);
++	return buf;
++}
++
++
++// #pragma mark - paths
++
++
++// Turns a request target (or a Destination URL) into a clean path below the
++// share, "/" for the share itself. Returns false for anything outside it.
++static bool
++share_path(string target, string& path)
++{
++	if (target.compare(0, 7, "http://") == 0 || target.compare(0, 8, "https://") == 0) {
++		size_t slash = target.find('/', target.find("//") + 2);
++		target = slash == string::npos ? "/" : target.substr(slash);
++	}
++	size_t q = target.find('?');
++	if (q != string::npos)
++		target.erase(q);
++	target = hangul_nfc(url_decode(target));
++
++	std::vector<string> parts;
++	size_t i = 0;
++	while (i <= target.size()) {
++		size_t j = target.find('/', i);
++		if (j == string::npos)
++			j = target.size();
++		string part = target.substr(i, j - i);
++		if (part == "..")
++			return false;
++		if (!part.empty() && part != ".")
++			parts.push_back(part);
++		i = j + 1;
++	}
++	if (parts.empty() || parts[0] != gShare)
++		return false;
++
++	path = "/";
++	for (size_t k = 1; k < parts.size(); k++) {
++		if (k > 1)
++			path += "/";
++		path += parts[k];
++	}
++	return true;
++}
++
++
++static string
++fs_path(const string& path)
++{
++	return path == "/" ? gRoot : gRoot + path;
++}
++
++
++static string
++href(const string& path, bool dir)
++{
++	string h = "/" + gShare + (path == "/" ? "" : path);
++	if (dir)
++		h += "/";
++	return url_encode(h);
++}
++
++
++static string
++base_name(const string& path)
++{
++	size_t s = path.rfind('/');
++	return s == string::npos ? path : path.substr(s + 1);
++}
++
++
++static string
++parent_of(const string& path)
++{
++	size_t s = path.rfind('/');
++	return s == 0 || s == string::npos ? "/" : path.substr(0, s);
++}
++
++
++static bool
++is_shadow(const string& path)
++{
++	string b = base_name(path);
++	return b.compare(0, 2, "._") == 0 || b == ".DS_Store";
++}
++
++
++static bool
++is_dir(const string& path)
++{
++	struct stat st;
++	return stat(fs_path(path).c_str(), &st) == 0 && S_ISDIR(st.st_mode);
++}
++
++
++static int
++remove_tree(const string& fs)
++{
++	struct stat st;
++	if (lstat(fs.c_str(), &st) != 0)
++		return errno;
++	if (S_ISDIR(st.st_mode)) {
++		DIR* d = opendir(fs.c_str());
++		if (d == NULL)
++			return errno;
++		std::vector<string> names;
++		while (struct dirent* e = readdir(d)) {
++			if (strcmp(e->d_name, ".") != 0 && strcmp(e->d_name, "..") != 0)
++				names.push_back(e->d_name);
++		}
++		closedir(d);
++		for (size_t i = 0; i < names.size(); i++) {
++			int err = remove_tree(fs + "/" + names[i]);
++			if (err != 0)
++				return err;
++		}
++		return rmdir(fs.c_str()) == 0 ? 0 : errno;
++	}
++	return unlink(fs.c_str()) == 0 ? 0 : errno;
++}
++
++
++static int
++copy_tree(const string& from, const string& to)
++{
++	struct stat st;
++	if (stat(from.c_str(), &st) != 0)
++		return errno;
++	if (S_ISDIR(st.st_mode)) {
++		if (mkdir(to.c_str(), 0755) != 0 && errno != EEXIST)
++			return errno;
++		DIR* d = opendir(from.c_str());
++		if (d == NULL)
++			return errno;
++		std::vector<string> names;
++		while (struct dirent* e = readdir(d)) {
++			if (strcmp(e->d_name, ".") != 0 && strcmp(e->d_name, "..") != 0)
++				names.push_back(e->d_name);
++		}
++		closedir(d);
++		for (size_t i = 0; i < names.size(); i++) {
++			int err = copy_tree(from + "/" + names[i], to + "/" + names[i]);
++			if (err != 0)
++				return err;
++		}
++		return 0;
++	}
++	int in = open(from.c_str(), O_RDONLY);
++	if (in < 0)
++		return errno;
++	int out = open(to.c_str(), O_WRONLY | O_CREAT | O_TRUNC, st.st_mode & 0777);
++	if (out < 0) {
++		int err = errno;
++		close(in);
++		return err;
++	}
++	char buf[65536];
++	ssize_t n;
++	int err = 0;
++	while ((n = read(in, buf, sizeof(buf))) > 0) {
++		if (write(out, buf, n) != n) {
++			err = errno ? errno : EIO;
++			break;
++		}
++	}
++	if (n < 0)
++		err = errno;
++	close(in);
++	close(out);
++	return err;
++}
++
++
++static int
++errno_status(int err)
++{
++	switch (err) {
++		case ENOENT: return 404;
++		case ENOTDIR: return 409;
++		case EACCES: case EPERM: case EROFS: return 403;
++		case ENOSPC: return 507;
++		case EEXIST: case ENOTEMPTY: return 405;
++		default: return 500;
++	}
++}
++
++
++// #pragma mark - connection
++
++
++struct Request {
++	string method;
++	string target;
++	string version;
++	std::map<string, string> headers;	// lower-case names
++
++	string Header(const char* name) const
++	{
++		std::map<string, string>::const_iterator i = headers.find(name);
++		return i == headers.end() ? "" : i->second;
++	}
++};
++
++
++struct Connection {
++	int fd;
++	string buffer;
++	bool keepAlive;
++
++	bool Fill()
++	{
++		char buf[65536];
++		ssize_t n = recv(fd, buf, sizeof(buf), 0);
++		if (n <= 0)
++			return false;
++		buffer.append(buf, n);
++		return true;
++	}
++
++	bool Send(const char* data, size_t size)
++	{
++		while (size > 0) {
++			ssize_t n = send(fd, data, size, 0);
++			if (n <= 0) {
++				if (n < 0 && errno == EINTR)
++					continue;
++				return false;
++			}
++			data += n;
++			size -= n;
++		}
++		return true;
++	}
++
++	bool Send(const string& s) { return Send(s.data(), s.size()); }
++
++	bool ReadRequest(Request& request)
++	{
++		size_t end;
++		while ((end = buffer.find("\r\n\r\n")) == string::npos) {
++			if (buffer.size() > 65536 || !Fill())
++				return false;
++		}
++		string head = buffer.substr(0, end);
++		buffer.erase(0, end + 4);
++
++		size_t lineEnd = head.find("\r\n");
++		string line = head.substr(0, lineEnd);
++		size_t a = line.find(' '), b = line.rfind(' ');
++		if (a == string::npos || b == a)
++			return false;
++		request.method = line.substr(0, a);
++		request.target = line.substr(a + 1, b - a - 1);
++		request.version = line.substr(b + 1);
++		request.headers.clear();
++		while (lineEnd != string::npos) {
++			size_t start = lineEnd + 2;
++			lineEnd = head.find("\r\n", start);
++			string h = head.substr(start, lineEnd == string::npos ? string::npos : lineEnd - start);
++			size_t colon = h.find(':');
++			if (colon != string::npos)
++				request.headers[lower(trim(h.substr(0, colon)))] = trim(h.substr(colon + 1));
++		}
++		string connection = lower(request.Header("connection"));
++		keepAlive = request.version == "HTTP/1.1" ? connection != "close"
++			: connection == "keep-alive";
++		return true;
++	}
++
++	// Reads the request body and hands it to sink in pieces. sink may be
++	// NULL to discard it. Returns false if the connection broke.
++	template<typename Sink>
++	bool ReadBody(const Request& request, Sink& sink)
++	{
++		if (lower(request.Header("expect")) == "100-continue")
++			Send("HTTP/1.1 100 Continue\r\n\r\n");
++
++		if (lower(request.Header("transfer-encoding")).find("chunked") != string::npos) {
++			while (true) {
++				size_t eol;
++				while ((eol = buffer.find("\r\n")) == string::npos) {
++					if (!Fill())
++						return false;
++				}
++				unsigned long size = strtoul(buffer.substr(0, eol).c_str(), NULL, 16);
++				buffer.erase(0, eol + 2);
++				if (size == 0) {
++					// trailers, then the final empty line
++					while (true) {
++						while ((eol = buffer.find("\r\n")) == string::npos) {
++							if (!Fill())
++								return false;
++						}
++						buffer.erase(0, eol + 2);
++						if (eol == 0)
++							return true;
++					}
++				}
++				if (!Pass(size, sink))
++					return false;
++				while (buffer.size() < 2) {
++					if (!Fill())
++						return false;
++				}
++				buffer.erase(0, 2);
++			}
++		}
++
++		string length = request.Header("content-length");
++		return Pass(length.empty() ? 0 : strtoull(length.c_str(), NULL, 10), sink);
++	}
++
++	template<typename Sink>
++	bool Pass(unsigned long long size, Sink& sink)
++	{
++		while (size > 0) {
++			if (buffer.empty() && !Fill())
++				return false;
++			size_t n = buffer.size() < size ? buffer.size() : size;
++			sink(buffer.data(), n);
++			buffer.erase(0, n);
++			size -= n;
++		}
++		return true;
++	}
++
++	bool Respond(int status, const string& body = "",
++		const string& extraHeaders = "", const char* type = NULL,
++		bool headOnly = false, long long length = -1)
++	{
++		const char* text = "OK";
++		switch (status) {
++			case 201: text = "Created"; break;
++			case 204: text = "No Content"; break;
++			case 206: text = "Partial Content"; break;
++			case 207: text = "Multi-Status"; break;
++			case 400: text = "Bad Request"; break;
++			case 403: text = "Forbidden"; break;
++			case 404: text = "Not Found"; break;
++			case 405: text = "Method Not Allowed"; break;
++			case 409: text = "Conflict"; break;
++			case 412: text = "Precondition Failed"; break;
++			case 415: text = "Unsupported Media Type"; break;
++			case 416: text = "Range Not Satisfiable"; break;
++			case 500: text = "Internal Server Error"; break;
++			case 501: text = "Not Implemented"; break;
++			case 502: text = "Bad Gateway"; break;
++			case 507: text = "Insufficient Storage"; break;
++		}
++		char head[512];
++		snprintf(head, sizeof(head), "HTTP/1.1 %d %s\r\nDate: %s\r\n"
++			"Server: renku_webdavd\r\nContent-Length: %lld\r\n%s%s%s%s\r\n",
++			status, text, http_date(time(NULL)).c_str(),
++			length >= 0 ? length : (long long)body.size(),
++			type != NULL ? "Content-Type: " : "", type != NULL ? type : "",
++			type != NULL ? "\r\n" : "",
++			keepAlive ? "" : "Connection: close\r\n");
++		if (gVerbose)
++			fprintf(stderr, "  -> %d\n", status);
++		string out = head;
++		// extraHeaders go before the blank line
++		out.insert(out.size() - 2, extraHeaders);
++		if (!headOnly && length < 0)
++			out += body;
++		return Send(out);
++	}
++};
++
++
++struct Discard {
++	void operator()(const char*, size_t) {}
++};
++
++
++struct Collect {
++	string data;
++	void operator()(const char* p, size_t n) { data.append(p, n); }
++};
++
++
++struct ToFile {
++	int fd;
++	int error;
++	void operator()(const char* p, size_t n)
++	{
++		while (error == 0 && n > 0) {
++			ssize_t w = write(fd, p, n);
++			if (w < 0) {
++				if (errno != EINTR)
++					error = errno;
++				continue;
++			}
++			p += w;
++			n -= w;
++		}
++	}
++};
++
++
++// #pragma mark - methods
++
++
++static string
++prop_entry(const string& path, const struct stat* st, const string* shadow,
++	time_t shadowTime)
++{
++	bool dir = st != NULL && S_ISDIR(st->st_mode);
++	time_t mtime = st != NULL ? st->st_mtime : shadowTime;
++	long long size = st != NULL ? (long long)st->st_size : (long long)shadow->size();
++	string name = path == "/" ? gShare : base_name(path);
++
++	string out = "<D:response><D:href>" + xml_escape(href(path, dir))
++		+ "</D:href><D:propstat><D:prop>"
++		+ "<D:displayname>" + xml_escape(name) + "</D:displayname>"
++		+ "<D:creationdate>" + iso_date(mtime) + "</D:creationdate>"
++		+ "<D:getlastmodified>" + http_date(mtime) + "</D:getlastmodified>";
++	char etag[96];
++	snprintf(etag, sizeof(etag), "\"%llx-%llx-%lx\"",
++		st != NULL ? (unsigned long long)st->st_ino : 0ULL,
++		(unsigned long long)size, (long)mtime);
++	out += string("<D:getetag>") + etag + "</D:getetag>";
++	if (dir) {
++		out += "<D:resourcetype><D:collection/></D:resourcetype>";
++		struct statvfs vfs;
++		if (statvfs(fs_path(path).c_str(), &vfs) == 0) {
++			char quota[160];
++			snprintf(quota, sizeof(quota),
++				"<D:quota-available-bytes>%llu</D:quota-available-bytes>"
++				"<D:quota-used-bytes>%llu</D:quota-used-bytes>",
++				(unsigned long long)vfs.f_bavail * vfs.f_frsize,
++				(unsigned long long)(vfs.f_blocks - vfs.f_bfree) * vfs.f_frsize);
++			out += quota;
++		}
++	} else {
++		char len[64];
++		snprintf(len, sizeof(len), "%lld", size);
++		out += "<D:resourcetype/><D:getcontentlength>" + string(len)
++			+ "</D:getcontentlength>"
++			"<D:getcontenttype>application/octet-stream</D:getcontenttype>";
++	}
++	out += "<D:supportedlock><D:lockentry><D:lockscope><D:exclusive/></D:lockscope>"
++		"<D:locktype><D:write/></D:locktype></D:lockentry></D:supportedlock>"
++		"<D:lockdiscovery/>"
++		"</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>";
++	return out;
++}
++
++
++static void
++do_propfind(Connection& c, const Request& r, const string& path)
++{
++	Collect request;
++	if (!c.ReadBody(r, request)) {
++		c.keepAlive = false;
++		return;
++	}
++	if (gVerbose)
++		fprintf(stderr, "  %s\n", request.data.c_str());
++
++	string body = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
++		"<D:multistatus xmlns:D=\"DAV:\">";
++	struct stat st;
++	if (is_shadow(path)) {
++		pthread_mutex_lock(&gLock);
++		std::map<string, string>::iterator i = gShadow.find(path);
++		bool found = i != gShadow.end();
++		if (found)
++			body += prop_entry(path, NULL, &i->second, gShadowTime[path]);
++		pthread_mutex_unlock(&gLock);
++		if (!found) {
++			c.Respond(404);
++			return;
++		}
++	} else {
++		if (stat(fs_path(path).c_str(), &st) != 0) {
++			c.Respond(errno_status(errno));
++			return;
++		}
++		body += prop_entry(path, &st, NULL, 0);
++		if (S_ISDIR(st.st_mode) && r.Header("depth") != "0") {
++			DIR* d = opendir(fs_path(path).c_str());
++			if (d != NULL) {
++				while (struct dirent* e = readdir(d)) {
++					if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
++						continue;
++					string child = (path == "/" ? "" : path) + "/" + e->d_name;
++					if (is_shadow(child))
++						continue;
++					struct stat cst;
++					if (stat(fs_path(child).c_str(), &cst) == 0)
++						body += prop_entry(child, &cst, NULL, 0);
++				}
++				closedir(d);
++			}
++			pthread_mutex_lock(&gLock);
++			string prefix = (path == "/" ? "" : path) + "/";
++			for (std::map<string, string>::iterator i = gShadow.lower_bound(prefix);
++					i != gShadow.end() && i->first.compare(0, prefix.size(), prefix) == 0;
++					i++) {
++				if (i->first.find('/', prefix.size()) == string::npos)
++					body += prop_entry(i->first, NULL, &i->second, gShadowTime[i->first]);
++			}
++			pthread_mutex_unlock(&gLock);
++		}
++	}
++	body += "</D:multistatus>";
++	c.Respond(207, body, "", "application/xml; charset=utf-8");
++}
++
++
++static void
++do_get(Connection& c, const Request& r, const string& path, bool head)
++{
++	if (is_shadow(path)) {
++		pthread_mutex_lock(&gLock);
++		std::map<string, string>::iterator i = gShadow.find(path);
++		string data;
++		bool found = i != gShadow.end();
++		if (found)
++			data = i->second;
++		pthread_mutex_unlock(&gLock);
++		if (!found)
++			c.Respond(404);
++		else
++			c.Respond(200, data, "", "application/octet-stream", head);
++		return;
++	}
++
++	string fs = fs_path(path);
++	struct stat st;
++	if (stat(fs.c_str(), &st) != 0) {
++		c.Respond(errno_status(errno));
++		return;
++	}
++	if (S_ISDIR(st.st_mode)) {
++		c.Respond(200, "<html><body>RenkuOS</body></html>\n", "",
++			"text/html; charset=utf-8", head);
++		return;
++	}
++	int fd = open(fs.c_str(), O_RDONLY);
++	if (fd < 0) {
++		c.Respond(errno_status(errno));
++		return;
++	}
++
++	long long size = st.st_size, from = 0, to = size - 1;
++	int status = 200;
++	string range = r.Header("range");
++	if (range.compare(0, 6, "bytes=") == 0 && range.find(',') == string::npos) {
++		string spec = range.substr(6);
++		size_t dash = spec.find('-');
++		if (dash != string::npos) {
++			string a = spec.substr(0, dash), b = spec.substr(dash + 1);
++			if (a.empty()) {
++				long long n = atoll(b.c_str());
++				from = n >= size ? 0 : size - n;
++			} else {
++				from = atoll(a.c_str());
++				if (!b.empty() && atoll(b.c_str()) < to)
++					to = atoll(b.c_str());
++			}
++			if (from >= size || from > to) {
++				close(fd);
++				char cr[64];
++				snprintf(cr, sizeof(cr), "Content-Range: bytes */%lld\r\n", size);
++				c.Respond(416, "", cr);
++				return;
++			}
++			status = 206;
++		}
++	}
++
++	char extra[256];
++	snprintf(extra, sizeof(extra), "Last-Modified: %s\r\nAccept-Ranges: bytes\r\n",
++		http_date(st.st_mtime).c_str());
++	string headers = extra;
++	if (status == 206) {
++		snprintf(extra, sizeof(extra), "Content-Range: bytes %lld-%lld/%lld\r\n",
++			from, to, size);
++		headers += extra;
++	}
++	long long length = size == 0 ? 0 : to - from + 1;
++	if (!c.Respond(status, "", headers, "application/octet-stream", head, length)
++		|| head) {
++		close(fd);
++		return;
++	}
++	if (lseek(fd, from, SEEK_SET) < 0) {
++		close(fd);
++		c.keepAlive = false;
++		return;
++	}
++	char buf[65536];
++	while (length > 0) {
++		ssize_t n = read(fd, buf, length < (long long)sizeof(buf) ? length : sizeof(buf));
++		if (n <= 0 || !c.Send(buf, n)) {
++			c.keepAlive = false;
++			break;
++		}
++		length -= n;
++	}
++	close(fd);
++}
++
++
++static void
++do_put(Connection& c, const Request& r, const string& path)
++{
++	if (path == "/") {
++		Discard discard;
++		c.keepAlive = c.ReadBody(r, discard) && c.keepAlive;
++		c.Respond(405);
++		return;
++	}
++	if (is_shadow(path)) {
++		Collect collect;
++		if (!c.ReadBody(r, collect)) {
++			c.keepAlive = false;
++			return;
++		}
++		pthread_mutex_lock(&gLock);
++		bool existed = gShadow.count(path) != 0;
++		gShadow[path] = collect.data;
++		gShadowTime[path] = time(NULL);
++		pthread_mutex_unlock(&gLock);
++		c.Respond(existed ? 204 : 201);
++		return;
++	}
++
++	string fs = fs_path(path);
++	struct stat st;
++	bool existed = stat(fs.c_str(), &st) == 0;
++	int fd = -1;
++	int err = 0;
++	if (existed && S_ISDIR(st.st_mode))
++		err = EEXIST;
++	else if (!is_dir(parent_of(path)))
++		err = ENOTDIR;
++	else {
++		fd = open(fs.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
++		if (fd < 0)
++			err = errno;
++	}
++
++	ToFile sink = { fd, 0 };
++	Discard discard;
++	bool ok = fd >= 0 ? c.ReadBody(r, sink) : c.ReadBody(r, discard);
++	if (fd >= 0)
++		close(fd);
++	if (!ok) {
++		c.keepAlive = false;
++		return;
++	}
++	if (err == 0 && sink.error != 0) {
++		// A short file (the volume filled up, say) is worse than none:
++		// webdavfs has already reported success to whoever wrote it.
++		err = sink.error;
++		unlink(fs.c_str());
++	}
++	if (err == ENOTDIR)
++		c.Respond(409);
++	else if (err != 0)
++		c.Respond(errno_status(err));
++	else
++		c.Respond(existed ? 204 : 201);
++}
++
++
++static void
++do_mkcol(Connection& c, const Request& r, const string& path)
++{
++	Collect body;
++	if (!c.ReadBody(r, body)) {
++		c.keepAlive = false;
++		return;
++	}
++	if (!body.data.empty()) {
++		c.Respond(415);
++		return;
++	}
++	if (!is_dir(parent_of(path))) {
++		c.Respond(409);
++		return;
++	}
++	if (mkdir(fs_path(path).c_str(), 0755) != 0)
++		c.Respond(errno == EEXIST ? 405 : errno_status(errno));
++	else
++		c.Respond(201);
++}
++
++
++static void
++do_delete(Connection& c, const string& path)
++{
++	if (path == "/") {
++		c.Respond(403);
++		return;
++	}
++	if (is_shadow(path)) {
++		pthread_mutex_lock(&gLock);
++		bool found = gShadow.erase(path) != 0;
++		gShadowTime.erase(path);
++		pthread_mutex_unlock(&gLock);
++		c.Respond(found ? 204 : 404);
++		return;
++	}
++	string fs = fs_path(path);
++	int err = remove_tree(fs);
++	if (err == 0) {
++		// AppleDouble companions of whatever was below it
++		pthread_mutex_lock(&gLock);
++		string prefix = path + "/";
++		std::map<string, string>::iterator i = gShadow.lower_bound(prefix);
++		while (i != gShadow.end() && i->first.compare(0, prefix.size(), prefix) == 0) {
++			gShadowTime.erase(i->first);
++			gShadow.erase(i++);
++		}
++		pthread_mutex_unlock(&gLock);
++	}
++	c.Respond(err == 0 ? 204 : errno_status(err));
++}
++
++
++static void
++do_copy_move(Connection& c, const Request& r, const string& path, bool move)
++{
++	string dest;
++	if (!share_path(r.Header("destination"), dest)) {
++		c.Respond(r.Header("destination").empty() ? 400 : 502);
++		return;
++	}
++	bool overwrite = lower(r.Header("overwrite")) != "f";
++	if (path == "/" || dest == "/" || dest == path) {
++		c.Respond(403);
++		return;
++	}
++
++	if (is_shadow(path) || is_shadow(dest)) {
++		pthread_mutex_lock(&gLock);
++		std::map<string, string>::iterator i = gShadow.find(path);
++		int status;
++		if (i == gShadow.end())
++			status = 404;
++		else if (gShadow.count(dest) != 0 && !overwrite)
++			status = 412;
++		else {
++			status = gShadow.count(dest) != 0 ? 204 : 201;
++			string data = i->second;
++			if (move) {
++				gShadow.erase(i);
++				gShadowTime.erase(path);
++			}
++			if (is_shadow(dest)) {
++				gShadow[dest] = data;
++				gShadowTime[dest] = time(NULL);
++			}
++		}
++		pthread_mutex_unlock(&gLock);
++		c.Respond(status);
++		return;
++	}
++
++	string from = fs_path(path), to = fs_path(dest);
++	struct stat st;
++	if (stat(from.c_str(), &st) != 0) {
++		c.Respond(errno_status(errno));
++		return;
++	}
++	if (!is_dir(parent_of(dest))) {
++		c.Respond(409);
++		return;
++	}
++	struct stat dst;
++	bool existed = lstat(to.c_str(), &dst) == 0;
++	if (existed) {
++		if (!overwrite) {
++			c.Respond(412);
++			return;
++		}
++		int err = remove_tree(to);
++		if (err != 0) {
++			c.Respond(errno_status(err));
++			return;
++		}
++	}
++	int err = 0;
++	if (move) {
++		if (rename(from.c_str(), to.c_str()) != 0) {
++			err = errno;
++			if (err == EXDEV && (err = copy_tree(from, to)) == 0)
++				err = remove_tree(from);
++		}
++	} else
++		err = copy_tree(from, to);
++	c.Respond(err != 0 ? errno_status(err) : existed ? 204 : 201);
++}
++
++
++static void
++do_lock(Connection& c, const Request& r, const string& path)
++{
++	Collect body;
++	if (!c.ReadBody(r, body)) {
++		c.keepAlive = false;
++		return;
++	}
++
++	// A refresh names its token in the If header; keep it.
++	string token;
++	string ifHeader = r.Header("if");
++	size_t a = ifHeader.find("<opaquelocktoken:");
++	if (a != string::npos) {
++		size_t b = ifHeader.find('>', a);
++		if (b != string::npos)
++			token = ifHeader.substr(a + 1, b - a - 1);
++	}
++	if (token.empty()) {
++		pthread_mutex_lock(&gLock);
++		unsigned long n = ++gLockCounter;
++		pthread_mutex_unlock(&gLock);
++		char buf[96];
++		snprintf(buf, sizeof(buf), "opaquelocktoken:%08lx-%04x-renku-%08lx",
++			(unsigned long)time(NULL), (unsigned)getpid() & 0xffff, n);
++		token = buf;
++	}
++
++	// LOCK on a name that does not exist yet creates it, empty.
++	int status = 200;
++	if (is_shadow(path)) {
++		pthread_mutex_lock(&gLock);
++		if (gShadow.count(path) == 0) {
++			gShadow[path] = "";
++			gShadowTime[path] = time(NULL);
++			status = 201;
++		}
++		pthread_mutex_unlock(&gLock);
++	} else {
++		struct stat st;
++		if (stat(fs_path(path).c_str(), &st) != 0) {
++			if (!is_dir(parent_of(path))) {
++				c.Respond(409);
++				return;
++			}
++			int fd = open(fs_path(path).c_str(), O_WRONLY | O_CREAT, 0644);
++			if (fd < 0) {
++				c.Respond(errno_status(errno));
++				return;
++			}
++			close(fd);
++			status = 201;
++		}
++	}
++
++	string timeout = r.Header("timeout");
++	if (timeout.empty())
++		timeout = "Second-600";
++	size_t comma = timeout.find(',');
++	if (comma != string::npos)
++		timeout.erase(comma);
++
++	string xml = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
++		"<D:prop xmlns:D=\"DAV:\"><D:lockdiscovery><D:activelock>"
++		"<D:locktype><D:write/></D:locktype><D:lockscope><D:exclusive/></D:lockscope>"
++		"<D:depth>0</D:depth>"
++		"<D:timeout>" + xml_escape(timeout) + "</D:timeout>"
++		"<D:locktoken><D:href>" + token + "</D:href></D:locktoken>"
++		"<D:lockroot><D:href>" + xml_escape(href(path, false)) + "</D:href></D:lockroot>"
++		"</D:activelock></D:lockdiscovery></D:prop>";
++	c.Respond(status, xml, "Lock-Token: <" + token + ">\r\n",
++		"application/xml; charset=utf-8");
++}
++
++
++static void
++do_proppatch(Connection& c, const Request& r, const string& path)
++{
++	Collect body;
++	if (!c.ReadBody(r, body)) {
++		c.keepAlive = false;
++		return;
++	}
++	string xml = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n"
++		"<D:multistatus xmlns:D=\"DAV:\"><D:response><D:href>"
++		+ xml_escape(href(path, is_dir(path)))
++		+ "</D:href><D:propstat><D:prop/><D:status>HTTP/1.1 200 OK</D:status>"
++		"</D:propstat></D:response></D:multistatus>";
++	c.Respond(207, xml, "", "application/xml; charset=utf-8");
++}
++
++
++static void
++handle(Connection& c, const Request& r)
++{
++	const string& m = r.method;
++	if (gVerbose) {
++		fprintf(stderr, "%s %s", m.c_str(), r.target.c_str());
++		for (std::map<string, string>::const_iterator i = r.headers.begin();
++				i != r.headers.end(); i++)
++			fprintf(stderr, " [%s: %s]", i->first.c_str(), i->second.c_str());
++		fprintf(stderr, "\n");
++	}
++	string path;
++	if (!share_path(r.target, path)) {
++		Discard discard;
++		c.keepAlive = c.ReadBody(r, discard) && c.keepAlive;
++		if (m == "OPTIONS")
++			c.Respond(200, "", "DAV: 1, 2\r\nAllow: OPTIONS, PROPFIND\r\n");
++		else
++			c.Respond(404);
++		return;
++	}
++
++	if (m == "OPTIONS") {
++		Discard discard;
++		c.keepAlive = c.ReadBody(r, discard) && c.keepAlive;
++		c.Respond(200, "", "DAV: 1, 2\r\nMS-Author-Via: DAV\r\n"
++			"Allow: OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND, PROPPATCH, "
++			"MKCOL, COPY, MOVE, LOCK, UNLOCK\r\n");
++	} else if (m == "PROPFIND")
++		do_propfind(c, r, path);
++	else if (m == "GET" || m == "HEAD") {
++		Discard discard;
++		c.keepAlive = c.ReadBody(r, discard) && c.keepAlive;
++		do_get(c, r, path, m == "HEAD");
++	} else if (m == "PUT")
++		do_put(c, r, path);
++	else if (m == "MKCOL")
++		do_mkcol(c, r, path);
++	else if (m == "DELETE" || m == "COPY" || m == "MOVE" || m == "UNLOCK") {
++		Discard discard;
++		if (!c.ReadBody(r, discard)) {
++			c.keepAlive = false;
++			return;
++		}
++		if (m == "DELETE")
++			do_delete(c, path);
++		else if (m == "UNLOCK")
++			c.Respond(204);
++		else
++			do_copy_move(c, r, path, m == "MOVE");
++	} else if (m == "LOCK")
++		do_lock(c, r, path);
++	else if (m == "PROPPATCH")
++		do_proppatch(c, r, path);
++	else {
++		Discard discard;
++		c.keepAlive = c.ReadBody(r, discard) && c.keepAlive;
++		c.Respond(501);
++	}
++}
++
++
++static void*
++serve(void* arg)
++{
++	Connection c;
++	c.fd = (int)(intptr_t)arg;
++	c.keepAlive = true;
++	Request r;
++	while (c.keepAlive && c.ReadRequest(r))
++		handle(c, r);
++	close(c.fd);
++	return NULL;
++}
++
++
++static bool
++peer_allowed(const struct sockaddr_in& peer)
++{
++	if (gAnyPeer)
++		return true;
++	uint32_t a = ntohl(peer.sin_addr.s_addr);
++	return a == 0x7f000001	// 127.0.0.1
++		|| a == 0x0a000202;	// 10.0.2.2, QEMU usermode's host side
++}
++
++
++int
++main(int argc, char** argv)
++{
++	int port = 2280;
++	int opt;
++	while ((opt = getopt(argc, argv, "p:r:n:av")) != -1) {
++		switch (opt) {
++			case 'p': port = atoi(optarg); break;
++			case 'r': gRoot = optarg; break;
++			case 'n': gShare = optarg; break;
++			case 'a': gAnyPeer = true; break;
++			case 'v': gVerbose = true; break;
++			default:
++				fprintf(stderr, "usage: %s [-p port] [-r root] [-n share-name] [-a] [-v]\n",
++					argv[0]);
++				return 1;
++		}
++	}
++	while (gRoot.size() > 1 && gRoot[gRoot.size() - 1] == '/')
++		gRoot.erase(gRoot.size() - 1);
++
++	signal(SIGPIPE, SIG_IGN);
++
++	int server = socket(AF_INET, SOCK_STREAM, 0);
++	if (server < 0) {
++		perror("socket");
++		return 1;
++	}
++	int one = 1;
++	setsockopt(server, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
++	struct sockaddr_in addr;
++	memset(&addr, 0, sizeof(addr));
++	addr.sin_family = AF_INET;
++	addr.sin_port = htons(port);
++	addr.sin_addr.s_addr = htonl(INADDR_ANY);
++	if (bind(server, (struct sockaddr*)&addr, sizeof(addr)) != 0
++		|| listen(server, 16) != 0) {
++		perror("bind/listen");
++		return 1;
++	}
++	fprintf(stderr, "renku_webdavd: serving %s as /%s/ on port %d\n",
++		gRoot.c_str(), gShare.c_str(), port);
++
++	while (true) {
++		struct sockaddr_in peer;
++		socklen_t peerLength = sizeof(peer);
++		int fd = accept(server, (struct sockaddr*)&peer, &peerLength);
++		if (fd < 0) {
++			if (errno != EINTR)
++				usleep(100000);
++			continue;
++		}
++		if (!peer_allowed(peer)) {
++			close(fd);
++			continue;
++		}
++		setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
++		struct timeval tv = { 300, 0 };
++		setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
++
++		pthread_t thread;
++		pthread_attr_t attr;
++		pthread_attr_init(&attr);
++		pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
++		if (pthread_create(&thread, &attr, serve, (void*)(intptr_t)fd) != 0)
++			close(fd);
++		pthread_attr_destroy(&attr);
++	}
++}

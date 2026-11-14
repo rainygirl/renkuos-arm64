@@ -28,7 +28,7 @@ arm64 포팅 자체를 패치하는 건 없습니다. 이 디렉터리가 더하
 | HaikuPorts 패키지 | packagefs가 거의 모든 패키지가 쓰는 zstd 압축을 못 읽음 | 정상적으로 읽고 설치됨 |
 | 커널 안정성 | TCP 연결이 타이머 도중 정리되거나 네트워크가 내려갈 때 패닉 | 고쳐짐 |
 
-20개 패치 각각이 정확히 무엇을 바꾸고 왜 그런지는
+각 패치가 정확히 무엇을 바꾸고 왜 그런지는
 [`AGENTS.md`](AGENTS.md)와 [`arm64-patch/README.md`](arm64-patch/README.ko.md)에
 있습니다.
 
@@ -45,14 +45,15 @@ arm64 포팅 자체를 패치하는 건 없습니다. 이 디렉터리가 더하
 
 - `renku-arm64.iso` -- USB 설치 매체. USB에 써서 디스크에 설치하면, 설치된
   시스템이 네트워크가 생긴 첫 부팅에서 R Chromium을 직접 받아옵니다(`0041`).
-- `renku-arm64-live.iso` -- R Chromium이 이미 포함된 같은 이미지. Installer가
-  다른 패키지들과 함께 그대로 타겟 디스크로 옮겨줍니다. [MacRenkuOS.app](macapp/)이
-  내려받아 설치에 쓰는 바로 그 ISO입니다.
+- `renku-arm64-live.iso` -- 라이브 매체. R Chromium이 이미 들어 있고
+  Installer는 없으며(`0042`-`0044`), 매체에서 바로 실행합니다.
+  [MacRenkuOS](https://github.com/rainygirl/MacRenkuOS)(`renkuos` 명령)가
+  `run-qemu-renku-arm64.sh --live`로 부팅하는 바로 그 ISO입니다.
 
-RenkuOS/Source 커밋 `8484655099aae479b59590d098dfcbf6fdc4d908`에서 빌드한
-`renku-arm64.iso`의 SHA-256은
-`a17e71567b58539af254746c6c3fad4df79331d9cb0ff183bfc50de114c06168`입니다.
-[GitHub 릴리스에서 다운로드](https://github.com/rainygirl/renkuos-arm64/releases/tag/2026.11.06)할 수 있습니다.
+두 ISO 모두 [최신 GitHub 릴리스](https://github.com/rainygirl/renkuos-arm64/releases/latest)에
+`renku-arm64-current.iso`, `renku-arm64-live-current.iso`라는 이름으로
+올라갑니다. MacRenkuOS는 뒤의 것을 이 이름으로 받아가므로 릴리스마다 이
+이름을 유지해야 합니다.
 
 ## ISO 빌드
 
@@ -116,6 +117,15 @@ Cmd-Tab과 스와이프로 다른 앱 전환 가능)에 들어가고, dylib가 �
 해상도(13인치 맥북 에어는 2560x1664)와 실제 크기(EDID)를 알려서, R Retina
 (UI 배율 자동)가 스스로 2배를 고릅니다. `RENKU_RES=WxH`로 해상도 지정,
 `RENKU_GUEST_SCALE=2`면 두 배, `RENKU_NOTCH=0`이면 dylib를 쓰지 않습니다.
+
+## 공유 폴더
+
+게스트가 실행되는 동안 게스트의 부트 볼륨이 맥에 **RenkuOS**라는 네트워크
+볼륨(Finder > 위치)으로 로그인 없이 읽기/쓰기로 마운트됩니다. 여기로 끌어다
+놓은 파일은 게스트에 그대로 들어가고, 반대도 마찬가지입니다. 게스트가
+WebDAV로 제공하고(`0047`, `renku_webdavd`) 이 맥에서만 접근할 수 있으며,
+`run-qemu-renku-arm64.sh`가 게스트가 응답하면 마운트하고 QEMU가 끝나면
+해제합니다. `RENKU_SHARE=0`이면 끕니다.
 
 ## SSH
 

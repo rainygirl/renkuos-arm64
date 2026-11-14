@@ -35,7 +35,7 @@
 # a disk, and 0041's renku-install-rchromium job fetches R Chromium itself
 # once that install's first real boot has network. The live medium instead
 # ships R Chromium already on it (0042), for running straight from the
-# medium (what MacRenkuOS.app boots) with no install and no network wait.
+# medium (what MacRenkuOS's `renkuos` command boots) with no install and no network wait.
 #
 # Environment variables:
 #   HAIKU_TREE_GIT_URL   Default https://github.com/RenkuOS/Source.git

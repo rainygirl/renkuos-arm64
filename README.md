@@ -28,8 +28,7 @@ architecture, plus a few fixes that only bite on arm64:
 | HaikuPorts packages | packagefs cannot read zstd packages, which is nearly all of them | Read and installed normally |
 | Kernel stability | Panics when a TCP connection is torn down mid-timer, or while the network goes down | Fixed |
 
-The technical detail -- exactly what each of the 20 patches changes and
-why -- is in [`AGENTS.md`](AGENTS.md) and [`arm64-patch/README.md`](arm64-patch/README.md).
+The technical detail -- exactly what each patch changes and why -- is in [`AGENTS.md`](AGENTS.md) and [`arm64-patch/README.md`](arm64-patch/README.md).
 
 ## Requirements
 
@@ -45,15 +44,15 @@ Two variants come out of the same patched tree (see `0042` in
 - `renku-arm64.iso` -- the USB install medium. Write it to a USB stick and
   install from it onto a disk; R Chromium comes later, fetched by the
   installed system's own first boot once it has network (`0041`).
-- `renku-arm64-live.iso` -- the same image with R Chromium already on it,
-  so Installer carries it straight onto the target disk with everything
-  else. This is the one [MacRenkuOS.app](macapp/) downloads and installs
-  from.
+- `renku-arm64-live.iso` -- the live medium: R Chromium already on it, no
+  Installer (`0042`-`0044`), run straight off the medium. This is what
+  [MacRenkuOS](https://github.com/rainygirl/MacRenkuOS) (the `renkuos`
+  command) boots, through `run-qemu-renku-arm64.sh --live`.
 
-The ISO built from RenkuOS/Source commit `8484655099aae479b59590d098dfcbf6fdc4d908`
-is `renku-arm64.iso` (SHA-256:
-`a17e71567b58539af254746c6c3fad4df79331d9cb0ff183bfc50de114c06168`).
-[Download it from the GitHub release](https://github.com/rainygirl/renkuos-arm64/releases/tag/2026.11.06).
+Both are attached to the
+[latest GitHub release](https://github.com/rainygirl/renkuos-arm64/releases/latest)
+as `renku-arm64-current.iso` and `renku-arm64-live-current.iso`; MacRenkuOS
+fetches the latter by that name, so a release must keep it.
 
 ## Building the ISO
 
@@ -122,6 +121,15 @@ screen inside that Space. The guest is offered the display's own resolution
 (UI scale Automatic) picks 2x itself. `RENKU_RES=WxH` overrides the
 resolution, `RENKU_GUEST_SCALE=2` doubles it, `RENKU_NOTCH=0` turns the
 dylib off.
+
+## Shared folder
+
+While the guest runs, its boot volume is mounted on the Mac as a network
+volume named **RenkuOS** (Finder > Locations), read-write, with no login --
+files dragged into it land in the guest, and the other way round. The guest
+serves it over WebDAV (`0047`, `renku_webdavd`), reachable from this Mac
+only, and `run-qemu-renku-arm64.sh` mounts it once the guest answers and
+unmounts it when QEMU exits. `RENKU_SHARE=0` turns it off.
 
 ## SSH
 

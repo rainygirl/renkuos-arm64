@@ -4,7 +4,7 @@ build-renku-arm64-iso.sh now builds two variants from the same patched
 tree: the USB install medium (unchanged -- 0041's post-install job fetches
 R Chromium there, once a real install has network) and a live medium that
 ships it already on the image, for running straight off the medium with
-no install and no network wait -- what MacRenkuOS.app boots.
+no install and no network wait -- what MacRenkuOS boots.
 
 Adds `rchromium-154.0.8036.0-31` to the arm64 repository list, same as
 `rappmarket-1.0.0-4` right above it, but only pulls it onto the image

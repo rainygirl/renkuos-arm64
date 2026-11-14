@@ -103,6 +103,21 @@
 #   nothing new. Default identity: ~/.ssh/id_ed25519; override with
 #   RENKU_SSH_KEY=/path/to/key if that's not the one the guest trusts.
 #
+# Shared folder (on by default):
+#   The guest's boot volume shows up on the Mac as a network volume named
+#   RenkuOS (Finder > Locations), read-write, with no login. The guest serves
+#   it over WebDAV (renku_webdavd, arm64-patch 0047) on port 2280, forwarded
+#   to 127.0.0.1:2280 here only -- never the LAN -- and this script mounts it
+#   with `mount_webdav -S` once the guest answers, then unmounts it when QEMU
+#   exits. Not through Finder's own "Connect to Server" path (`mount volume`
+#   / NetFS): that pops a "connect as" login dialog for 127.0.0.1 even though
+#   the server asks for no credentials; -S suppresses all UI.
+#   A guest built without 0047 just never answers and nothing is mounted.
+#   RENKU_SHARE=0 turns it off, RENKU_SHARE_PORT moves the host port,
+#   RENKU_SHARE_MNT moves the mount point (default
+#   ~/Library/Application Support/Renku/RenkuOS; Finder lists the volume by
+#   name, not by that path).
+#
 set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -135,6 +150,11 @@ done
 QMP="/tmp/renku-arm64.qmp"
 SERIAL="$DIR/serial.log"
 NET_ARGS=(-netdev user,id=n0,hostfwd=tcp::2222-:22 -device virtio-net-pci,netdev=n0)
+SHARE="${RENKU_SHARE:-1}"
+SHARE_PORT="${RENKU_SHARE_PORT:-2280}"
+SHARE_URL="http://127.0.0.1:$SHARE_PORT/RenkuOS/"
+SHARE_MNT="${RENKU_SHARE_MNT:-$HOME/Library/Application Support/Renku/RenkuOS}"
+[ "$SHARE" = "1" ] && NET_ARGS[1]="${NET_ARGS[1]},hostfwd=tcp:127.0.0.1:$SHARE_PORT-:2280"
 RUNNER=()
 if [ "$BRIDGED" = "1" ]; then
 	QMP="/tmp/renku-arm64-bridged.qmp"
@@ -467,9 +487,48 @@ fi
 panic_watchdog "$QEMU_PID" &
 PANIC_WATCHDOG_PID=$!
 
+share_unmount() {
+	mount | grep -qF " on $SHARE_MNT (" || return 0
+	umount "$SHARE_MNT" 2>/dev/null || diskutil unmount force "$SHARE_MNT" >/dev/null 2>&1 || true
+}
+
+# Mounts the guest's renku_webdavd whenever it answers and isn't mounted,
+# for as long as QEMU runs: the guest may take a while to boot, a guest
+# restart (0046's first-run one included) takes the server away and
+# webdavfs, with no UI to ask, unmounts by itself -- so it is mounted again
+# once the guest is back. A guest without 0047 never answers at all.
+share_mount_loop() {
+	local pid="$1" said=0
+	share_unmount   # left over from a run that never got to clean up
+	mkdir -p "$SHARE_MNT"
+	while kill -0 "$pid" 2>/dev/null; do
+		if ! mount | grep -qF " on $SHARE_MNT (" \
+				&& curl -fs -m 2 -X OPTIONS -D - -o /dev/null "$SHARE_URL" 2>/dev/null | grep -qi '^DAV:'; then
+			if /sbin/mount_webdav -S -v RenkuOS "$SHARE_URL" "$SHARE_MNT" 2>/dev/null; then
+				[ "$said" = 1 ] || echo "shared:   the guest's /boot is mounted as RenkuOS (Finder > Locations)"
+				said=1
+			fi
+		fi
+		sleep 3
+	done
+}
+
+SHARE_LOOP_PID=""
+share_cleanup() {
+	[ -n "$SHARE_LOOP_PID" ] && kill "$SHARE_LOOP_PID" 2>/dev/null
+	share_unmount
+}
+if [ "$SHARE" = "1" ]; then
+	share_mount_loop "$QEMU_PID" &
+	SHARE_LOOP_PID=$!
+	# Also on Ctrl-C or a closed Terminal: a mount left pointing at a
+	# server that is gone makes Finder hang on it.
+	trap share_cleanup EXIT
+fi
+
 # Exit 42 means panic_watchdog quit qemu itself after a guest kernel panic
 # -- distinct from qemu's own exit status (0 for a clean guest shutdown,
-# nonzero for qemu itself failing) so a caller (MacRenkuOS.app's launcher)
+# nonzero for qemu itself failing) so a caller
 # can tell a corrupted disk apart from an ordinary exit.
 finish() {
 	kill "$PANIC_WATCHDOG_PID" 2>/dev/null
@@ -535,6 +594,7 @@ CLIP_PID=$!
 cleanup_clipboard() {
 	kill "$CLIP_PID" 2>/dev/null
 	ssh -o ControlPath=/tmp/renku-arm64-clip.ctl -O exit baron@127.0.0.1 2>/dev/null
+	share_cleanup
 }
 trap cleanup_clipboard EXIT
 echo "clipboard: syncing with the Mac (ssh key: ${RENKU_SSH_KEY:-$HOME/.ssh/id_ed25519})"

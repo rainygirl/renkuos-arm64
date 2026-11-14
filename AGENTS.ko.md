@@ -21,6 +21,7 @@ SKIP_CROSS_TOOLS=1 ./build-renku-arm64-iso.sh   # 캐시된 툴체인 재사용
 ```sh
 ./run-qemu-renku-arm64.sh                # 설치된 디스크를 창으로 부팅
 ./run-qemu-renku-arm64.sh --install      # ISO를 디스크와 함께 부팅(설치용)
+./run-qemu-renku-arm64.sh --live         # renku-arm64-live.iso만 부팅(MacRenkuOS가 쓰는 방식)
 ./run-qemu-renku-arm64.sh --headless     # 창 없이 부팅
 ./run-qemu-renku-arm64.sh --bridged      # LAN에서 접근 가능한 NIC 추가(sudo 필요)
 ./run-qemu-renku-arm64.sh --clipboard    # 맥 클립보드를 게스트와 동기화
@@ -43,7 +44,7 @@ SKIP_CROSS_TOOLS=1 ./build-renku-arm64-iso.sh   # 캐시된 툴체인 재사용
 
 ## 패치
 
-`arm64-patch/patches/`에는 RenkuOS/Source에 적용하는 패치 19개가 있고,
+`arm64-patch/patches/`에는 RenkuOS/Source에 적용하는 패치(0001-0047)가 있고,
 `build-renku-arm64-iso.sh`가 빌드할 때마다 자동으로 적용합니다. 각 패치가
 정확히 뭘 바꾸고 왜 그런지는
 [`arm64-patch/README.ko.md`](arm64-patch/README.ko.md)에 파일 단위로 자세히
@@ -360,8 +361,8 @@ such file or directory` 같은, 진짜 원인과는 전혀 상관없어 보이�
   연결하는 대신 고정된 지연을 쓴 것인데, 부팅이 이미 걸리는 몇 초나 풀
   스크린에 아예 도달하지 못했을 때 이미 허용하는 30초 폴백에 비하면
   무시할 만한 비용입니다. 수정 확인: 실제 크래시 해상도에서, 수정 없는
-  `--fullscreen` 경로 그대로 5번 중 5번 성공했고, 실제 `MacRenkuOS.app`
-  자체도 실제 대상 Mac에서 처음부터 끝까지 다시 띄워서 확인했습니다.
+  `--fullscreen` 경로 그대로 5번 중 5번 성공했고, 실제 MacRenkuOS 런처
+  (당시 .app, 지금은 같은 `run-qemu-renku-arm64.sh` 경로를 쓰는 `renkuos` 명령) 자체도 실제 대상 Mac에서 처음부터 끝까지 다시 띄워서 확인했습니다.
 
   둘 다 각각 업스트림/이 포트 자신의 툴링 문제입니다(virtio_gpu 쪽은
   업스트림 Haiku 커널 코드로 올릴 가치가 있고, qemu-notch 쪽은 Haiku
@@ -421,7 +422,7 @@ HaikuWebKit 자체를 패치하고 `haikuwebkit`/`haikuwebkit_devel` 패키지�
   스케일이 Installer가 열리기도 전인 첫 라이브 부팅부터 -- 나중에 패키지를
   설치한 뒤가 아니라 -- 이미 정해집니다.
 - **레티나/HiDPI 감지** (0037-0040): 실제 대상 Mac(13인치 맥북 에어)에서
-  실제 `MacRenkuOS.app` 실행 경로로 확인했습니다 -- `virtio_gpu_get_edid_info()`가
+  실제 MacRenkuOS 실행 경로로 확인했습니다 -- `virtio_gpu_get_edid_info()`가
   패널을 2560x1664에서 29x18cm(≈224dpi)로 읽었고, `Desktop::_AutomaticUIScale()`가
   이를 2배로 바꾸는데, 그 패널에 정확히 맞는 스케일입니다 -- 크래시 없이
   정상 동작하는 `sshd`까지 완전히 부팅했고, 이건 위의 `0036`/qemu-notch
