@@ -1,0 +1,95 @@
+Subject: [PATCH] minimum arm64: install R Chromium right after a real install
+
+A fresh install had no browser on it until someone opened R AppMarket (or
+ran pkgman by hand) to fetch R Chromium themselves. Since the RENKU Apps
+repository config is already on the image (0008) and R AppMarket proves
+the repository itself is reachable from first boot (0020), there is no
+reason to wait for a person to do that by hand.
+
+Adds a new `renku-install-rchromium` job to data/launch/user's `desktop`
+target, modeled directly on the existing `create-installer-link` and
+`update-time` jobs already there:
+
+- Gated on `not read_only`, the same condition `create-installer-link`
+  uses to tell a real install apart from the live/install medium itself
+  -- the live medium's own write area is far too small for a browser
+  package (this is the exact "No space left on device" pkgman error a
+  300 MiB live medium gives for this install), so the job must never run
+  there.
+- Triggered `on network_available`, the same condition `update-time`
+  already uses to wait for the network stack, since pkgman needs it.
+- Gated on a marker file the job's own script
+  (data/system/boot/renku-install-rchromium) writes, but only once
+  `pkgman install -y rchromium` actually succeeds -- a boot with no
+  network yet or an unreachable server leaves the marker unwritten, so
+  the job simply tries again on the next boot instead of a failed first
+  attempt losing the one-shot marker for good.
+
+This deliberately does not reuse the stock `first-login`/PostInstallScript
+mechanism (`~/config/settings/first_login` + `/boot/system/boot/first-login/
+*.sh`): that marker is deleted unconditionally once the job runs, success
+or not, so a script dropped in there gets exactly one try, ever, with no
+way to retry a transient failure.
+
+diff --git a/build/jam/images/definitions/minimum b/build/jam/images/definitions/minimum
+index 7d742c66..9c6fd187 100644
+--- a/build/jam/images/definitions/minimum
++++ b/build/jam/images/definitions/minimum
+@@ -490,3 +490,12 @@ if $(HAIKU_PACKAGING_ARCHS[1]) = arm64 {
+ 	AddFilesToHaikuImage system settings package-repositories
+ 		: $(renkuApps) : "RENKU Apps" ;
+ }
++
++# On arm64, install R Chromium from that same repository right after a
++# real install (data/launch/user's renku-install-rchromium job runs this).
++if $(HAIKU_PACKAGING_ARCHS[1]) = arm64 {
++	local renkuInstallRChromium = renku-install-rchromium ;
++	SEARCH on $(renkuInstallRChromium)
++		= [ FDirName $(HAIKU_TOP) data system boot ] ;
++	AddFilesToHaikuImage system boot : $(renkuInstallRChromium) ;
++}
+diff --git a/data/launch/user b/data/launch/user
+index b0ef5602..7cef7f2c 100644
+--- a/data/launch/user
++++ b/data/launch/user
+@@ -52,6 +52,21 @@ target desktop {
+ 		requires x-vnd.Be-TSKB
+ 	}
+
++	job renku-install-rchromium {
++		# Only on a real install (never the live/install medium itself,
++		# where the write area is far too small for a browser package),
++		# and only once: the script writes the marker itself, but only
++		# on a successful "pkgman install", so a boot with no network
++		# yet or an unreachable server retries on the next boot instead
++		# of losing the one-shot marker for good.
++		if {
++			not read_only
++			not file_exists ~/config/settings/renku-rchromium-installed
++		}
++		launch /bin/sh /boot/system/boot/renku-install-rchromium
++		on network_available
++	}
++
+ 	job create-installer-link {
+ 		# When run from a read-only medium a.k.a. live desktop
+ 		if {
+diff --git a/data/system/boot/renku-install-rchromium b/data/system/boot/renku-install-rchromium
+new file mode 100755
+index 00000000..eec98f42
+--- /dev/null
++++ b/data/system/boot/renku-install-rchromium
+@@ -0,0 +1,13 @@
++#!/bin/sh
++# Installs R Chromium from the RENKU Apps repository on the first boot of a
++# real install (see data/launch/user's renku-install-rchromium job: gated on
++# "not read_only", so this never runs on the live/install medium itself).
++# The marker is only written on success, so a failed attempt (no network
++# yet, server unreachable) retries on the next boot instead of giving up.
++
++marker=~/config/settings/renku-rchromium-installed
++
++pkgman refresh >/var/log/renku-rchromium-install.log 2>&1
++if pkgman install -y rchromium >>/var/log/renku-rchromium-install.log 2>&1; then
++	touch "$marker"
++fi

@@ -1,0 +1,55 @@
+Subject: [PATCH] minimum arm64: boot the live medium straight to the desktop
+
+`0043` dropped Installer off the live medium's SYSTEM_APPS/Deskbar
+lists, since there is nothing to install to there -- but FirstBootPrompt
+itself (Install/Try it out) still came up on every live boot regardless,
+since `data/launch/user`'s `run` job enters it whenever the medium is
+read-only, which the live medium always is. "Try it out" was the only
+button on that screen that actually did anything: clicking "Install"
+fails outright now that the binary is gone (FirstBootPromptWindow draws
+that button unconditionally, with no check that Installer still exists --
+confirmed from `src/apps/firstbootprompt/BootPromptWindow.cpp`, out of
+scope to fix there).
+
+The `run` job's own condition is:
+
+    if {
+        file_exists /system/bin/FirstBootPrompt
+        or { not file_exists .../Locale\ settings ; read_only }
+    }
+    then { first_boot } else { desktop }
+
+-- so it only ever reaches `first_boot` (and FirstBootPrompt) at all when
+the binary exists. Filters FirstBootPrompt out of SYSTEM_BIN the same way
+`0043` already filters Installer out of SYSTEM_APPS/DESKBAR_APPLICATIONS,
+under the same `RENKU_LIVE_BUILD=1` gate: no `data/launch/user` change
+needed, the `run` job's existing `file_exists` check does the rest, and
+the live medium now goes straight to the desktop on every boot.
+
+diff --git a/build/jam/images/definitions/minimum b/build/jam/images/definitions/minimum
+index 71cb51ab..5f81fe79 100644
+--- a/build/jam/images/definitions/minimum
++++ b/build/jam/images/definitions/minimum
+@@ -183,6 +183,22 @@ if $(RENKU_LIVE_BUILD) = 1 {
+ 		}
+ 	}
+ 	DESKBAR_APPLICATIONS = $(filteredDeskbarApps) ;
++
++	# data/launch/user's `run` job only ever enters the `first_boot`
++	# target (FirstBootPrompt, with its Install/Try it out buttons) when
++	# /system/bin/FirstBootPrompt exists; otherwise it falls straight
++	# through to `desktop`. Leaving FirstBootPrompt off SYSTEM_BIN here
++	# is enough on its own to skip straight to the desktop on the live
++	# medium -- no data/launch/user change needed, same as Installer
++	# above.
++	local filteredSystemBin ;
++	local bin ;
++	for bin in $(SYSTEM_BIN) {
++		if $(bin) != FirstBootPrompt {
++			filteredSystemBin += $(bin) ;
++		}
++	}
++	SYSTEM_BIN = $(filteredSystemBin) ;
+ }
+
+ DESKBAR_DESKTOP_APPLETS =

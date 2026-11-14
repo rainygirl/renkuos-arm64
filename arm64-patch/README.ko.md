@@ -61,7 +61,7 @@ Launching x-vnd.haiku-media_server failed: No such file or directory
 합니다. 부팅도 되고 거기서 설치도 되는 매체를 내놓는 쪽은 이 패치입니다.
 
 
-### 오디오 너머: 0005-0032
+### 오디오 너머: 0005-0044
 
 설치된 arm64 시스템에서 모든 앱을 시험하며 드러난 문제를, 이미지 안에서
 우회하지 않고 이미지 자체에서 고친 것들입니다.
@@ -92,7 +92,59 @@ Launching x-vnd.haiku-media_server failed: No such file or directory
 | `0026-vm-free-shadowed-modified-pages` | 메모리가 부족할 때 sshd의 `exec()`에서 `ASSERT FAILED (vm_page.cpp:3172): (page->State() != PAGE_STATE_MODIFIED)`로 VM이 커널 디버거에 멈췄습니다. 업스트림의 장치별 modified 큐 도입 뒤로 MODIFIED 페이지는 캐시에서 빠진 다음에는 해제할 수 없는데, 가려진 페이지를 해제하는 익명 캐시 병합 경로 두 곳(`_MergePagesSmallerConsumer`, `_MergeSwapPages`)이 `_FreePageRange()`와 `Delete()`처럼 먼저 CACHED로 옮기지 않았습니다. 이제 옮깁니다. [RenkuOS/Source#343](https://github.com/RenkuOS/Source/pull/343)으로 제출했습니다. |
 | `0027-vfs-unlock-io-context-before-free` | 메모리가 부족할 때 R Chromium의 `fork()`에서 `acquire_spinlock(): Failed to acquire spinlock ... (value: deadbeef)`로 VM이 커널 디버거에 멈췄습니다. upstream c02707824b 이후 `vfs_new_io_context()`는 새 컨텍스트의 락을 `WriteLocker`로 잡아 두는데, FD 테이블 할당에 실패하면 컨텍스트를 해제하고 반환해서 그 뒤 락커가 해제된 메모리의 락을 풀었습니다. 이제 락을 먼저 풀고 없앤 뒤 해제합니다. |
 | `0031-arm64-fix-icache-line-size-shift` | 부팅이 모듈/드라이버를 로드하는 지점마다(처음엔 네트워크 드라이버 로딩에서 재현됐지만 그것만의 문제는 아님) CPU 100%로 영원히 멈출 수 있었습니다. `arch_cpu_sync_icache()`가 `CTR_EL0`에서 아이캐시 라인 크기를 구할 때 `ctr_el0 & 0xF`(하위 4비트 마스킹) 대신 `ctr_el0 << 0xF`(레지스터 전체를 왼쪽으로 15비트 시프트)를 썼습니다 — 바로 아래 `dcache_line_size`는 이걸 제대로 합니다. `4 << (거대한 시프트량)`은 C++에서 정의되지 않은 동작이고, 라인 크기가 0으로 계산될 수 있는데, 그러면 바로 아래 무효화 루프가 절대 진행되지 않는 무한 루프가 됩니다. QEMU/hvf에서 멈춘 vCPU의 PC를 샘플링해서 이 함수의 무효화 루프 안에 계속 머무는 걸 확인했습니다. 업스트림 Haiku arm64 코드(`6bcb56f62dfd20138ddc4194972f6eec7101800d`에서 도입)로, 이 포트만의 문제가 아니며 확인되면 업스트림에 올릴 가치가 있습니다. |
-| `0032-launchdaemon-restart-throttle` | 모든 실행 시도 직후 바로 종료되는 `service` 잡(QEMU/hvf에서 virtio-net-pci를 붙였을 때 `media_server`, 그리고 별개로 `sshd`에서 관찰됨 — 아래 "네트워크 장치가 launch_daemon의 registrar 부트스트랩을 데드락시킬 수 있음" 참고)이 `B_SYSTEM_OBJECT_UPDATE`의 `B_TEAM_DELETED` 핸들러에 의해 커널이 team을 만들고 없앨 수 있는 최대 속도로 재시작되고 있었습니다 — 커널 스레드 덤프로 확인: 해당 잡의 team ID가 5초마다 약 3000씩 올라가는데 세마포어/포트/스레드/팀/가용 메모리는 전부 평평했습니다(누수 없이 그냥 스로틀 없는 루프). 핸들러 자체의 `// TODO: take restart throttle into account` 주석이 이미 이 공백을 지적하고 있었습니다. 이제 각 `Job`이 마지막 실행 시각을 기억하고, 그로부터 1초 이내에 team이 죽으면 즉시가 아니라 일회성 `BMessageRunner`를 통해 재시작합니다. 업스트림 `src/servers/launch/` 코드로 이 포트만의 것이 아니며, 근본적인 재시작 원인이 무엇이든 상관없이 업스트림에 올릴 가치가 있습니다. |
+| `0032-launchdaemon-restart-throttle` | 모든 실행 시도 직후 바로 종료되는 `service` 잡(QEMU/hvf에서 virtio-net-pci를 붙였을 때 `media_server`, 그리고 별개로 `sshd`에서 관찰됨 — 아래 "네트워크 장치가 있으면 데스크탑이 영원히 안 뜨던 문제" 참고)이 `B_SYSTEM_OBJECT_UPDATE`의 `B_TEAM_DELETED` 핸들러에 의해 커널이 team을 만들고 없앨 수 있는 최대 속도로 재시작되고 있었습니다 — 커널 스레드 덤프로 확인: 해당 잡의 team ID가 5초마다 약 3000씩 올라가는데 세마포어/포트/스레드/팀/가용 메모리는 전부 평평했습니다(누수 없이 그냥 스로틀 없는 루프). 핸들러 자체의 `// TODO: take restart throttle into account` 주석이 이미 이 공백을 지적하고 있었습니다. 이제 각 `Job`이 마지막 실행 시각을 기억하고, 그로부터 1초 이내에 team이 죽으면 즉시가 아니라 일회성 `BMessageRunner`를 통해 재시작합니다. 업스트림 `src/servers/launch/` 코드로 이 포트만의 것이 아니며, 근본적인 재시작 원인이 무엇이든 상관없이 업스트림에 올릴 가치가 있습니다. |
+| `0033-media-server-addon-launch-retry` | `media_server`가 `media_addon_server`를 실행하려는 시도(signature로 찾고, 안 되면 경로로) 한 번이 실패하면 바로 `exit(1)`했습니다. `launch_daemon`의 종료 코드 로깅으로 확인: 데스크탑까지 도달하지 못하는 부팅(NIC 연결 시)에서는 1, 도달하는 부팅에서는 0. 이제 signature-then-path 전체 시퀀스를 100ms 간격으로 최대 20번 재시도합니다 — 그 자체로 제대로 된, 범위가 잘 제한된 견고성 수정이지만, 이것만으로는 근본 문제를 고치지 못한다고 확인했습니다(아래 참고). |
+| `0034-autologin-startsession-retry` | `autologin`은 일회성 `job`(`service`가 아님)이라서, `getpwuid(0)`이나 `BLaunchRoster().StartSession()` 호출 한 번만 실패해도 유저 세션이 없고, 따라서 데스크탑도 영원히 없습니다 — 부팅의 다른 부분은 멀쩍이 정상으로 보이는데도요. 같은 종료 코드 로깅으로 확인했고, 한 단계 더 추적했습니다: 이 상황에서는 `getpwuid(0)`이 3초에 걸친 30번의 재시도 전부에서 `NULL`을 반환합니다 — 짧은 레이스가 아니라 지속적인 실패입니다. 이제 두 호출을 묶어서 몇 초간 재시도한 뒤 포기합니다 — `0033`과 같은 이유이고, 마찬가지로 그것만으로는 충분하지 않다고 확인했습니다: `getpwuid(0)`이 애초에 계속 실패했던 진짜 원인은 바로 아래에서 찾아 고쳤습니다. |
+| `0036-packagefs-lock-read-against-activation` | `0032`/`0033`/`0034`의 증상들 뒤에 있던 진짜 근본 원인입니다: `packagefs_read()`(`src/add-ons/kernel/file_systems/packagefs/kernel_interface.cpp`) — 일반 `read()` 전부, registrar 자신의 초기 `fopen("/etc/passwd")`도 포함해서 그 뒤에 있는 진입점 — 는 `packagefs_read_stat()`/`read_symlink()`/`access()`와 달리 아무 락도 잡지 않았습니다. 동시에 일어나는 패키지 활성화(`AddPackageNode()`/`RemovePackageNode()`, 부모 디렉토리의 쓰기 락 아래서 실행)가 읽기 도중에 노드의 `PackageNode`를 바꿔칠 수 있어서, 언락된 읽기가 반쯤 해제/초기화 중인 `file_cache`에 걸려 0으로 채워진 페이지를 받아올 수 있었고, 동시에 락이 걸린 `stat()`은 스왑 이후 버전의 크기를 보고했습니다 — 직접 확인: `fstat()`이 127바이트를 보고하는데 실제 내용은 전부 0, 실제 파일은 고정된 43바이트. 이제 `packagefs_read()`에 `DirectoryReadLocker`를 잡습니다(형제 함수들과 동일) — 단, 원리상 같은 위험이 있는 `packagefs_io()`에는 *일부러* 걸지 않습니다: `packagefs_io()`는 `packagefs_read()` 자신의 안에서도 같은 스레드로 재진입 호출되는데(`node->Read()` -> `file_cache_read()` -> 캐시 미스 -> `vfs_read_pages()` -> `vfs_vnode_io()`가 다시 `packagefs_io()`로), Haiku의 `rw_lock`은 스레드별 재진입 추적이 없어서 둘 다 잠그면 쓰기 측이 대기 중일 때 자기 자신과 교착합니다 — 실제로 그 버전을 빌드해서 부팅 테스트해보니 동일 테스트 6번 중 6번 모두 재현됐습니다. `packagefs_read()`의 락은 `node->Read()` 호출 전체를 감싸므로 `packagefs_io()`로의 재진입 경로도 이미 보호합니다. 수정 확인: 수정 전 6번 중 6번 멈췄던 바로 그 설정이 수정 후 10번 중 10번 모두 정상 동작하는 `sshd`까지 도달했습니다. 이 포트만의 것이 아닌 업스트림 Haiku 커널 코드로, 업스트림에 올릴 가치가 있습니다. |
+
+| `0037-app-server-dpi-ui-scale` | 글꼴 크기를 고르지 않았을 때 app_server는 해상도만으로 UI 스케일을 골랐습니다(1920x1080 넘으면 1.5배, 3840x2160 넘으면 2배) — 13인치 2560x1664 노트북 패널과 27인치 2560x1440 모니터가 픽셀 밀도는 전혀 다른데도 같은 스케일을 받았습니다. 이제 EDID에서 패널의 실제 물리 크기를 읽어 `dpi / 110`을 1~3 사이 0.25 단위로 씁니다. EDID가 없으면 예전 해상도 규칙을 그대로 씁니다. [renkuos-apps/renku-retina](../../renkuos-apps/renku-retina)(원래는 `rretina` 패키지로 나중에 `pkgman install`하는 방식, 그 프로젝트의 패치 0001)에서 가져왔습니다 — 이미지 자체에 녹여 넣어서, 나중에 패키지를 설치한 뒤가 아니라 Installer가 열리기도 전인 첫 라이브 부팅부터 이미 올바른 스케일이 정해집니다. 실제 대상 Mac에서 확인: EDID가 2560x1664에서 29x18cm(≈224dpi)로 읽혀 2배를 고르는데, 그 패널에 정확히 맞는 값입니다. |
+| `0038-tracker-desktop-location-scale` | 데스크탑 아이콘 위치는 픽셀로 저장되어서, UI 스케일이 바뀌면(HiDPI 디스플레이에서 더 큰 기본 글꼴이 되거나, 사용자가 글꼴 크기를 고르거나) 아이콘과 그 라벨들이 서로 겹칩니다. 이제 Tracker가 위치를 저장할 때의 스케일을 데스크탑 디렉토리의 속성(`_trk/pinfo_scale`)으로 기록하고, 불러올 때 현재 스케일로 다시 비례시킵니다. renku-retina(패치 0002)에서 가져왔습니다 — 이미지에 녹여 넣은 이유는 `0037` 참고. |
+| `0039-ui-scale-setting` | Screen 설정에 "UI scale" 메뉴(Automatic, 100%, 150%, 200%)를 추가합니다 — 그전엔 손으로 고른 네 개의 글꼴 크기뿐이라, 한 번 고르면 다음에 어떤 디스플레이로 부팅하든 그대로 고정됐습니다. "Automatic"은 `~/config/settings/system/app_server/ui_scale`에 `auto`를 남겨서, 저장된 크기가 덮어쓰는 게 아니라 `0037`의 EDID 기반 결정이 매 부팅마다 다시 실행되게 합니다. renku-retina(패치 0003)에서 가져왔습니다 — 이미지에 녹여 넣은 이유는 `0037` 참고. |
+| `0040-virtio-gpu-follow-host-size` | 유저랜드 헬퍼가 아무것도 건드리지 않고 호스트(QEMU)의 현재 창 크기를 물어볼 수 있는 `VIRTIO_GPU_GET_PREFERRED_SIZE` ioctl을 추가하고, 두 번째 프로세스가 장치를 리셋 없이 열 수 있게 하며, 이미 놓친 완료를 영원히 기다릴 수 있던 명령 완료 대기 버그(간헐적으로 화면이 검게 나옴, x86_64에서 5번 중 2번 확인)를 고칩니다. 프레임버퍼는 이제 contiguous 메모리를 구할 수 있는 가장 큰 모드로 할당됩니다 — 순서대로 7680x4320(8K), 5120x2880(5K), 3840x2160(4K)을 시도하고 — `set_display_mode()`는 담을 수 없는 모드를 조용히 넘겨쓰는 대신 거부합니다. `0037` 시기 테스트에서 Apple Silicon Mac Mini의 실제 `system_profiler` 해상도인 6720x2836에서 app_server가 매번(결정적으로) 크래시하는 걸 확인했는데, 이는 원래 업스트림이 고른 5K만으로는 충분하지 않았기 때문입니다 — 이 포트 자신의 QEMU 런처가 게스트에게 호스트 해상도를 그대로 제공하기 때문입니다. 8K를 먼저 시도하는 캐스케이드로 바로 그 해상도에서 수정을 확인했습니다. renku-retina(패치 0004, 이게 가능하게 하는 EDID 재조회도 함께 포함 — `0037` 참고)에서 가져왔고, 프레임버퍼 캐스케이드는 이 포트에서 추가한 부분입니다. |
+| `0041-arm64-auto-install-rchromium` | 설치 직후에는 R AppMarket을 열거나 `pkgman`을 직접 실행하기 전까지 브라우저가 전혀 없었습니다. `data/launch/user`의 `desktop` 타겟에 `renku-install-rchromium` job을 추가합니다: `create-installer-link`가 이미 실제 설치와 라이브/설치 매체를 구분하는 데 쓰는 `not read_only` 조건으로 걸어두고(라이브 매체의 쓰기 영역은 브라우저 패키지를 담기엔 너무 작아서, 거기서 실행하면 바로 pkgman이 내는 "No space left on device" 오류가 남), `update-time`이 이미 쓰는 `on network_available`로 트리거하며, job 자신의 스크립트(`data/system/boot/renku-install-rchromium`)가 `pkgman install -y rchromium`이 실제로 성공했을 때만 쓰는 마커로 게이트합니다 — 아직 네트워크가 안 올라왔거나 서버에 닿지 않는 부팅이면 다음 부팅에서 그냥 다시 시도합니다. 기존 `first-login`/`PostInstallScript` 메커니즘은 일부러 쓰지 않았습니다: 그 마커는 스크립트 성공 여부와 무관하게 무조건 지워지므로, 딱 한 번만 시도할 기회를 줄 뿐입니다. |
+| `0042-live-image-rchromium` | 위의 USB 설치 매체는 여전히 네트워크가 있는 실제 부팅이 한 번 있어야 R Chromium이 생깁니다. [MacRenkuOS.app](../macapp/)이 실제로 내려받아 설치에 쓰는 라이브 매체는 이미지에 바로 올려서 포함시킵니다 — 같은 `build-renku-arm64-iso.sh` 트리를 다른 방식으로 한 번 더 빌드하는 것뿐입니다: `RENKU_LIVE_BUILD=1`이면 `rchromium-154.0.8036.0-28`을 `AddHaikuImageSystemPackages`에 추가하는데, `DefaultBuildProfiles`에서 이 jam 변수로 게이트해 뒀기 때문에 일반 설치용 빌드는 이걸 요청하지 않습니다. 그 전에 재벤더링이 필요했습니다: `package_repo`는 이 로컬 HaikuPorts-info 레포지토리의 나머지와 vendor가 다른 패키지를 거부하는데, 이는 `0012`의 curl/wget과 `0020`의 rappmarket이 이미 부딛힌 것과 똑같은 제약이고, 거기서는 각자의 레시피에서 vendor를 "Haiku Project"로 강제해서 다시 빌드하는 식으로 피해갔습니다 — 하지만 몇 시간짜리 네이티브 Chromium 빌드로 똑같이 하는 건 현실적이지 않습니다. 대신 `build-renku-arm64-iso.sh`는 이미 빌드된 hpkg를 재벤더링합니다: 호스트용 `package` 툴(`<build>package`, jam이 다른 호스트용 빌드 툴을 만드는 것과 같은 방식)을 빌드하고, 내려받은 hpkg를 추출해서, extract가 써 주는 `.PackageInfo`의 vendor 줄만 고친 뒤, 그 수정된 사본으로 다시 패키징합니다 — 바이너리는 그대로고 메타데이터만 다릅니다. |
+| `0043-live-image-no-installer` | 라이브 매체(`RENKU_LIVE_BUILD=1`)는 매체에서 바로 실행되는 게 전제라서 — 거기선 설치할 게 없습니다. 같은 jam 변수로 게이트해서 `Installer`를 `SYSTEM_APPS`와 `DESKBAR_APPLICATIONS` 양쪽에서 걸러냅니다. `data/launch/user`의 `create-installer-link` job(읽기전용/라이브 부팅에서 데스크탑에 Installer 바로가기를 만드는 job)은 이미 `file_exists /boot/system/apps/Installer`로 게이트되어 있어서, 바이너리를 빼는 것만으로도 그 바로가기가 안 생기게 하는 데 충분합니다 — 거기는 따로 손댈 게 없습니다. |
+| `0044-live-image-skip-firstboot` | `0043`으로도 FirstBootPrompt의 Install/Try it out 화면 자체는 매번 라이브 부팅 때마다 그대로 떴습니다(`data/launch/user`의 `run` job은 매체가 읽기전용인지로 이 화면을 띄울지 정하는데, 라이브 매체는 항상 읽기전용입니다) — 바이너리가 사라졌으니 "Install"은 눌러도 실패하는 죽은 버튼이 되고요(`FirstBootPromptWindow`는 Installer가 실제로 있는지 확인하지 않고 그 버튼을 무조건 그립니다). `run`의 조건은 `/system/bin/FirstBootPrompt`가 있을 때만 `first_boot`로 들어가므로, `RENKU_LIVE_BUILD=1`일 때 `SYSTEM_BIN`에서 그걸 걸러내는 것만으로 — `0043`과 같은 방식 — `data/launch/user`를 따로 안 고쳐도 라이브 매체가 바로 데스크탑으로 부팅되게 할 수 있습니다. |
+
+## 어떤 패치가 RenkuOS/Source PR 후보인가
+
+이 패치 세트 대부분은 이 포트만의 것입니다: arm64용 `@minimum-anyboot` 빌드
+프로파일 설정, 패키지 목록, 레포지토리 정의처럼 이 이미지에만 해당하는
+패키징입니다. 업스트림에 보낼 만한 게 아닙니다. 소수의 패치는 다릅니다:
+RenkuOS/Source 자체 코드의 실제 버그를 고친 것으로, 이 포트가 arm64와
+QEMU/hvf를 보통보다 더 세게 굴려서 발견됐을 뿐이고, 이 포트가 있든 없든
+업스트림에 들어가야 할 수정입니다. PR 준비를 위해 따로 뽑았습니다:
+
+**이미 업스트림에 보낸 것:**
+
+| 패치 | PR |
+| --- | --- |
+| `0026-vm-free-shadowed-modified-pages` | [RenkuOS/Source#343](https://github.com/RenkuOS/Source/pull/343) |
+
+**위 설명에서 이미 업스트림 대상이라고 적어뒀지만 아직 안 보낸 것:**
+
+| 패치 | 버그가 실제로 있는 곳 |
+| --- | --- |
+| `0017-tcp-timer-teardown` | `src/system/kernel/...` TCP 엔드포인트 해제가 자기 재전송 타이머와 경쟁 — 아키텍처 무관, 릴리스 커널 빌드라면 어디서나. |
+| `0031-arm64-fix-icache-line-size-shift` | `arch_cpu_sync_icache()`, `src/system/kernel/arch/arm64/arch_cpu.cpp` — arm64 부팅이면 어디서나, 이 포트만의 문제 아님. |
+| `0032-launchdaemon-restart-throttle` | `src/servers/launch/` — launch 직후 종료하는 `service` job이면 아키텍처 무관, 핸들러 자신의 `// TODO: take restart throttle into account` 주석이 이미 이 구멍을 가리키고 있었음. |
+| `0036-packagefs-lock-read-against-activation` | `src/add-ons/kernel/file_systems/packagefs/kernel_interface.cpp` — `packagefs_read()`의 락 누락, 패키지 활성화와 경쟁하는 동시 읽기가 충분하면 어느 아키텍처에서도 재현 가능. |
+
+**같은 종류의 진짜, 포트 고유가 아닌 버그로 보이지만 업스트림을 염두에
+두고 따로 검토한 적은 없는 것 — 보내기 전에 한 번 더 볼 가치가 있음:**
+
+| 패치 | 위치 |
+| --- | --- |
+| `0019-net-notifications-keep-loaded` | `net_server`의 모듈 락과 `net_notifications_control()` 간의 교착 — arm64 고유 아닌 일반적인 버그. |
+| `0021-arm64-libroot-swap-float` | libroot의 `__swap_float`/`__swap_double` — arm64 고유(`fmov` 오퍼랜드 문제)지만, 어느 arm64 빌드에서나 나는 libroot 버그이고 이 포트만의 것은 아님. |
+| `0023-arm64-kernel-empty-translation-map` | 한 번도 할당된 적 없는 페이지 테이블을 해제하는 `~VMSAv8TranslationMap` — arm64 고유, 이 포트만의 것 아님. |
+| `0024-libbe-app-launched-by-exec` | `BApplication`/roster의 looper 포트를 `exec()` 너머로 넘기는 부분 — 일반 libbe, 아키텍처 무관. |
+| `0025-usb-disk-recover-after-timeout` | `usb_disk`가 타임아웃된 전송 후 Bulk-Only 리셋과 재시도를 안 하던 부분 — 일반 USB 드라이버 코드, 아키텍처 무관. |
+| `0027-vfs-unlock-io-context-before-free` | `vfs_new_io_context()`가 할당 실패 시 해제된 메모리를 언락하는 부분(업스트림 `c02707824b`에 뿌리를 둠) — 일반 VFS 코드, 아키텍처 무관. |
+
+위 표의 나머지는 전부 이 포트만의 것입니다: arm64용으로 줄인
+`@minimum-anyboot` 이미지라서만 의미가 있는 빌드 프로파일 작업과
+패키징, 설정입니다.
 
 ## 사용법
 

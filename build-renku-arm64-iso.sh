@@ -23,6 +23,20 @@
 # Usage:
 #   ./build-renku-arm64-iso.sh [output-iso-path]
 #
+# Two variants come out of the same patched tree and the same compile --
+# only the image-assembly step at the end differs, so a second invocation
+# with SKIP_CROSS_TOOLS=1 (and RENKU_LIVE_BUILD flipped) reuses everything
+# already built and only redoes that last step:
+#
+#   ./build-renku-arm64-iso.sh                              # -> renku-arm64.iso (USB install medium)
+#   RENKU_LIVE_BUILD=1 ./build-renku-arm64-iso.sh renku-arm64-live.iso   # -> live medium, R Chromium baked in
+#
+# The install medium stays exactly what it always was: Installer puts it on
+# a disk, and 0041's renku-install-rchromium job fetches R Chromium itself
+# once that install's first real boot has network. The live medium instead
+# ships R Chromium already on it (0042), for running straight from the
+# medium (what MacRenkuOS.app boots) with no install and no network wait.
+#
 # Environment variables:
 #   HAIKU_TREE_GIT_URL   Default https://github.com/RenkuOS/Source.git
 #   HAIKU_TREE_GIT_REF   Branch, tag or commit to build. Default: the
@@ -32,6 +46,10 @@
 #                        and the patches may not apply there.
 #   SKIP_CROSS_TOOLS=1   Reuse an already-built cross-toolchain instead of
 #                        rebuilding it (that step alone is roughly an hour).
+#   RENKU_LIVE_BUILD=1   Build the live variant: 0042's R Chromium package is
+#                        added to the image instead of being left for
+#                        0041's post-install job to fetch. Default: 0 (the
+#                        USB install variant).
 #   JOBS                 Parallelism inside the container. Default: nproc.
 #
 # Requirements on the Mac:
@@ -51,9 +69,11 @@ ISO_IN_CONTAINER="/root/renku-arm64.iso"
 HAIKU_TREE_GIT_URL="${HAIKU_TREE_GIT_URL:-https://github.com/RenkuOS/Source.git}"
 HAIKU_TREE_GIT_REF="${HAIKU_TREE_GIT_REF:-8484655099aae479b59590d098dfcbf6fdc4d908}"
 SKIP_CROSS_TOOLS="${SKIP_CROSS_TOOLS:-0}"
+RENKU_LIVE_BUILD="${RENKU_LIVE_BUILD:-0}"
 JOBS="${JOBS:-}"
 
 log() { printf '\n\033[1;34m==>\033[0m %s\n' "$*"; }
+log "RENKU_LIVE_BUILD=$RENKU_LIVE_BUILD, SKIP_CROSS_TOOLS=$SKIP_CROSS_TOOLS, output=$OUTPUT_ISO"
 die() { printf '\n\033[1;31mERROR:\033[0m %s\n' "$*" >&2; exit 1; }
 
 [ "$(uname -s)" = "Darwin" ] || die "this script is for macOS"
@@ -115,6 +135,7 @@ log "Running the build inside the container (this is the slow part)"
 	-e HAIKU_TREE_GIT_URL="$HAIKU_TREE_GIT_URL" \
 	-e HAIKU_TREE_GIT_REF="$HAIKU_TREE_GIT_REF" \
 	-e SKIP_CROSS_TOOLS="$SKIP_CROSS_TOOLS" \
+	-e RENKU_LIVE_BUILD="$RENKU_LIVE_BUILD" \
 	-e JOBS="$JOBS" \
 	-e WORK_DIR="$WORK_IN_CONTAINER" \
 	-e OUTPUT_ISO="$ISO_IN_CONTAINER" \
@@ -311,6 +332,40 @@ else
 		--distro-compatibility compatible --use-gcc-pipe -j"$JOBS" )
 fi
 
+if [ "$RENKU_LIVE_BUILD" = "1" ]; then
+# ---------------------------------------------------------------------------
+log "Staging R Chromium for the live image (0042)"
+# ---------------------------------------------------------------------------
+# AddRepositoryPackage/package_repo refuse a package whose vendor differs
+# from the rest of this local HaikuPorts-info repository (the same
+# constraint 0012's curl/wget and 0020's rappmarket already work around by
+# rebuilding with vendor forced to "Haiku Project"). Rebuilding R Chromium
+# from source just for that is a multi-hour native Chromium build, so this
+# re-vendors the already-built hpkg instead: extract it with the host
+# `package` tool (built as <build>package the same way jam builds any other
+# host-side tool it needs), edit the vendor line in the `.PackageInfo` that
+# extraction writes out, and repack with that edited copy -- same binaries,
+# only the metadata differs, exactly what 0012/0020 describe doing by
+# rebuilding from the recipe instead.
+	( cd "$GEN" && "$JAM" -q -j"$JOBS" '<build>package' )
+	PACKAGE_TOOL="$(find "$GEN/objects" -type f -name package -path '*tools/package/package' 2>/dev/null | head -1)"
+	[ -n "$PACKAGE_TOOL" ] || die "host package tool not found after building <build>package"
+
+	RCHROMIUM_HPKG="rchromium-154.0.8036.0-28-arm64.hpkg"
+	curl -fL -o "$WORK_DIR/$RCHROMIUM_HPKG.orig" \
+		"https://pkgman.rainygirl.com/arm64/packages/$RCHROMIUM_HPKG"
+
+	RVDIR="$WORK_DIR/rchromium-revendor"
+	rm -rf "$RVDIR"
+	mkdir -p "$RVDIR"
+	"$PACKAGE_TOOL" extract -C "$RVDIR" "$WORK_DIR/$RCHROMIUM_HPKG.orig"
+	[ -f "$RVDIR/.PackageInfo" ] || die "package extract did not produce a .PackageInfo -- the re-vendor approach needs revisiting, see arm64-patch/README.md's 0042 note"
+	sed -i -E 's/^vendor([[:space:]]+).*/vendor\1"Haiku Project"/' "$RVDIR/.PackageInfo"
+	"$PACKAGE_TOOL" create -C "$RVDIR" -i "$RVDIR/.PackageInfo" -q \
+		"$GEN/download/$RCHROMIUM_HPKG"
+	log "Re-vendored and staged $RCHROMIUM_HPKG"
+fi
+
 # ---------------------------------------------------------------------------
 log "Building the ISO (jam @minimum-anyboot) -- this is the slow part"
 # ---------------------------------------------------------------------------
@@ -325,7 +380,7 @@ log "Building the ISO (jam @minimum-anyboot) -- this is the slow part"
 # "failed to open ISO file".
 export HAIKU_NO_DOWNLOADS=1
 ( cd "$GEN" && "$JAM" -q -j"$JOBS" haiku-boot-cd )
-( cd "$GEN" && "$JAM" -q -j"$JOBS" '@minimum-anyboot' )
+( cd "$GEN" && "$JAM" -q -j"$JOBS" -sRENKU_LIVE_BUILD="$RENKU_LIVE_BUILD" '@minimum-anyboot' )
 
 SRC_ISO="$GEN/haiku-minimum-anyboot.iso"
 [ -f "$SRC_ISO" ] || die "expected ISO not found at $SRC_ISO"
@@ -359,7 +414,7 @@ if ! esp_loader_ok "$SRC_ISO"; then
 	log "EFI system partition is stale -- rebuilding it"
 	rm -f "$GEN/objects/haiku/arm64/release/efi/system/boot/esp.image" "$SRC_ISO"
 	( cd "$GEN" && "$JAM" -q -j"$JOBS" haiku-boot-cd )
-	( cd "$GEN" && "$JAM" -q -j"$JOBS" '@minimum-anyboot' )
+	( cd "$GEN" && "$JAM" -q -j"$JOBS" -sRENKU_LIVE_BUILD="$RENKU_LIVE_BUILD" '@minimum-anyboot' )
 	esp_loader_ok "$SRC_ISO" || die "BOOTAA64.EFI in the ISO does not match haiku_loader.efi"
 fi
 mkdir -p "$(dirname "$OUTPUT_ISO")"

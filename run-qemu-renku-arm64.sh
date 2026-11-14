@@ -6,6 +6,11 @@
 #   ./run-qemu-renku-arm64.sh                boot the installed disk, full screen
 #   ./run-qemu-renku-arm64.sh --install      boot the ISO with the disk attached,
 #                                       to partition and install with it
+#   ./run-qemu-renku-arm64.sh --live          boot renku-arm64-live.iso alone, no
+#                                       disk at all -- that medium has no
+#                                       Installer on it (see arm64-patch's
+#                                       0042/0043), only R Chromium already
+#                                       included; what MacRenkuOS.app runs
 #   ./run-qemu-renku-arm64.sh --headless     no window; QMP control socket only
 #   ./run-qemu-renku-arm64.sh --tcg          force emulation over hvf
 #   ./run-qemu-renku-arm64.sh --bridged      add a second NIC on the real LAN
@@ -95,10 +100,11 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DISK="${RENKU_DISK:-$DIR/renku-arm64-vm.img}"
 ISO="${RENKU_ISO:-$DIR/renku-arm64.iso}"
 
-INSTALL=0; HEADLESS=0; FORCE_TCG=0; BRIDGED=0; CLIPBOARD=0; FULLSCREEN=1
+INSTALL=0; LIVE=0; HEADLESS=0; FORCE_TCG=0; BRIDGED=0; CLIPBOARD=0; FULLSCREEN=1
 for a in "$@"; do
 	case "$a" in
 		--install)   INSTALL=1 ;;
+		--live)      LIVE=1 ;;
 		--headless)  HEADLESS=1 ;;
 		--tcg)       FORCE_TCG=1 ;;
 		--bridged)   BRIDGED=1 ;;
@@ -131,14 +137,33 @@ if [ "$BRIDGED" = "1" ]; then
 	fi
 fi
 
-if pgrep -f "qemu-system-aarch64.*$DISK" >/dev/null 2>&1; then
+if [ "$LIVE" = "0" ] && pgrep -f "qemu-system-aarch64.*$DISK" >/dev/null 2>&1; then
 	echo "already running against $DISK -- two QEMU instances on the same disk will corrupt it" >&2
 	exit 1
 fi
+if [ "$LIVE" = "1" ] && pgrep -f "qemu-system-aarch64.*renku-arm64-live-overlay.qcow2" >/dev/null 2>&1; then
+	echo "a --live session is already running -- its overlay would get recreated out from under it" >&2
+	exit 1
+fi
 
-if [ ! -f "$DISK" ]; then
+# --live boots the ISO alone (no disk at all, see MEDIA below) -- nothing
+# here needs $DISK to exist.
+if [ "$LIVE" = "0" ] && [ ! -f "$DISK" ]; then
 	[ "$INSTALL" = "1" ] || echo "no disk yet at $DISK -- creating an empty one, but it has no OS on it; run with --install first" >&2
-	qemu-img create -f raw "$DISK" 8G
+	# A pre-partitioned template (MBR + an empty BFS data partition, same
+	# layout and sizes as $ISO's own anyboot MBR, with the EFI System
+	# Partition copied verbatim from it too) skips DriveSetup entirely:
+	# Installer finds a ready BFS target the moment it opens, rather than
+	# "No suitable partition found" over an unpartitioned raw file. Falls
+	# back to the old empty-raw-file behavior if the template is missing
+	# (building this port from source without it) -- Installer then needs
+	# DriveSetup run by hand first, same as always.
+	TEMPLATE="${RENKU_DISK_TEMPLATE:-$DIR/arm64-patch/renku-arm64-template-disk.qcow2}"
+	if [ -f "$TEMPLATE" ]; then
+		qemu-img convert -f qcow2 -O raw "$TEMPLATE" "$DISK"
+	else
+		qemu-img create -f raw "$DISK" 16G
+	fi
 fi
 
 FW=""
@@ -155,18 +180,54 @@ if [ "$FORCE_TCG" = "0" ] && [ "$(uname -m)" = "arm64" ] \
 fi
 
 MEDIA=()
-if [ "$INSTALL" = "1" ]; then
+if [ "$LIVE" = "1" ]; then
+	if [ ! -f "$ISO" ]; then
+		echo "live medium not found: $ISO -- build it with RENKU_LIVE_BUILD=1 ./build-renku-arm64-iso.sh renku-arm64-live.iso" >&2
+		exit 1
+	fi
+	# No disk at all: the live medium has no Installer on it (see
+	# arm64-patch's 0043) and is never installed from, only booted -- same
+	# qcow2-overlay-over-the-ISO trick as --install, minus the second
+	# controller and disk a real install would need.
+	ISO_OVERLAY="$(dirname "$DISK")/renku-arm64-live-overlay.qcow2"
+	rm -f "$ISO_OVERLAY"
+	qemu-img create -f qcow2 -F raw -b "$ISO" "$ISO_OVERLAY" >/dev/null \
+		|| { echo "could not create a qcow2 overlay for $ISO" >&2; exit 1; }
+	MEDIA=(-drive file="$ISO_OVERLAY",if=none,id=drv0,format=qcow2
+	       -device usb-storage,bus=usb.0,drive=drv0)
+	echo "medium:   $ISO (live, via a throwaway qcow2 overlay, no disk attached)"
+elif [ "$INSTALL" = "1" ]; then
 	if [ ! -f "$ISO" ]; then
 		echo "installer medium not found: $ISO -- building it now (this can take a while)" >&2
 		"$DIR/build-renku-arm64-iso.sh"
 	fi
 	# ISO first (boots), target disk on its own controller.
-	MEDIA=(-drive file="$ISO",if=none,id=drv0,format=raw
+	#
+	# The ISO is never attached directly: a qcow2 overlay backed by it
+	# means every write the guest makes lands in the overlay, and the ISO
+	# itself is only ever opened for reading, straight from qcow2's own
+	# backing-file semantics -- no `readonly=on` needed, and unlike that
+	# flag, this does not stop the guest from writing to the anyboot
+	# image's own live-session area, which it does use (RenkuOS's anyboot
+	# image carries a writable area for things like syslog during a live
+	# session; `readonly=on` on the raw ISO, tried first, blocked that
+	# outright and turned an ordinary write into a BFS "last transaction
+	# still open" kernel panic -- confirmed via the exact "Read-only file
+	# system" / "could not write back" lines the panic logged just before
+	# it, on a session that had been live for several minutes). The
+	# overlay is recreated fresh on every launch -- it is scratch for this
+	# one live/install session, not something that needs to survive a
+	# restart (unlike $DISK, the actual install target).
+	ISO_OVERLAY="$(dirname "$DISK")/renku-arm64-iso-overlay.qcow2"
+	rm -f "$ISO_OVERLAY"
+	qemu-img create -f qcow2 -F raw -b "$ISO" "$ISO_OVERLAY" >/dev/null \
+		|| { echo "could not create a qcow2 overlay for $ISO" >&2; exit 1; }
+	MEDIA=(-drive file="$ISO_OVERLAY",if=none,id=drv0,format=qcow2
 	       -device usb-storage,bus=usb.0,drive=drv0
 	       -device qemu-xhci,id=usb2
 	       -drive file="$DISK",if=none,id=drv1,format=raw
 	       -device usb-storage,bus=usb2.0,drive=drv1)
-	echo "medium:   $ISO"
+	echo "medium:   $ISO (via a throwaway qcow2 overlay)"
 else
 	MEDIA=(-drive file="$DISK",if=none,id=drv0,format=raw
 	       -device usb-storage,bus=usb.0,drive=drv0)
@@ -215,7 +276,7 @@ else
 fi
 
 rm -f "$QMP"
-echo "disk:     $DISK"
+[ "$LIVE" = "1" ] || echo "disk:     $DISK"
 echo "accel:    $ACCEL   cpu: $CPU"
 echo "serial:   $SERIAL"
 echo "qmp:      $QMP"
@@ -293,8 +354,24 @@ boot_watchdog() {
 			# would normally still be running is the same hang without the
 			# storm (seen under some vCPU/GIC combinations) -- 20s of an
 			# unmoving byte count, itself not checked before 20s in, so a
-			# legitimately slow early stage is never mistaken for it.
-			if [ "$elapsed" -ge 20 ] && [ "$stalled_checks" -ge 20 ]; then
+			# legitimately slow early stage is never mistaken for it. But
+			# only up to the point the network stack comes up
+			# (register_domain lines, well past the early driver-loading
+			# window spurious interrupts show up in): once the system
+			# reaches a usable desktop or an interactive installer, ordinary
+			# GUI use produces no serial chatter at all while idle -- a user
+			# reading the Welcome dialog, or this script's own QMP-driven
+			# screendumps between clicks, both look exactly like "stalled"
+			# to a byte count alone. A fixed elapsed-time cutoff was tried
+			# first and confirmed NOT enough -- boot time to reach that
+			# point varies, and GUI interaction can still be going on well
+			# past any reasonable fixed bound. Confirmed happening before
+			# this fix: a live GUI session sitting at Installer's main
+			# dialog got killed and silently restarted from scratch by this
+			# exact check, repeatedly, each time wiping out an in-progress
+			# install.
+			if [ "$elapsed" -ge 20 ] && [ "$stalled_checks" -ge 20 ] \
+					&& ! grep -q "register_domain" "$SERIAL" 2>/dev/null; then
 				return 0
 			fi
 		fi
@@ -303,6 +380,35 @@ boot_watchdog() {
 	done
 	return 1
 }
+
+# Watches for the rest of the session (not just the boot window above):
+# a guest kernel panic drops into the kernel debugger (KDL), which answers
+# nothing -- no mouse, no keyboard, no network -- and from the outside
+# looks exactly like QEMU itself hanging. Confirmed happening on a disk
+# left dirty by an earlier forced-kill of this same script (see AGENTS.md's
+# "Shut the guest down properly" note): BFS remounted read-only, and the
+# next write (syslog_daemon, in the case that was actually seen) panicked
+# with "last transaction still open". Detecting it here turns a silently
+# frozen window into a clean QMP quit plus a message that says why --
+# this script can't fix a corrupted disk, but it can stop pretending
+# nothing is wrong. Runs until $1 (the qemu PID) exits on its own.
+panic_watchdog() {
+	local pid="$1"
+	while kill -0 "$pid" 2>/dev/null; do
+		if [ -f "$SERIAL" ] && tail -c 4096 "$SERIAL" 2>/dev/null \
+				| grep -qE 'PANIC:|^kdebug>|entered the debugger'; then
+			echo "PANIC: the guest crashed (kernel panic or a team's debug_server catching it) -- the serial log shows it, not QEMU hanging. Quitting cleanly instead of leaving an unresponsive window; if this was a kernel panic, the disk this VM boots from is likely corrupted (see AGENTS.md's \"Shut the guest down properly\" note) and may need reinstalling." >&2
+			printf '{"execute":"qmp_capabilities"}\n{"execute":"quit"}\n' \
+				| timeout 3 nc -U "$QMP" >/dev/null 2>&1
+			touch "$PANIC_MARKER"
+			return
+		fi
+		sleep 3
+	done
+}
+
+PANIC_MARKER="/tmp/renku-arm64-panic.$$"
+rm -f "$PANIC_MARKER"
 
 QEMU_PID=""
 for SMP_TRY in 4 2 1; do
@@ -327,12 +433,29 @@ if [ -z "$QEMU_PID" ]; then
 	exit 1
 fi
 
+panic_watchdog "$QEMU_PID" &
+PANIC_WATCHDOG_PID=$!
+
+# Exit 42 means panic_watchdog quit qemu itself after a guest kernel panic
+# -- distinct from qemu's own exit status (0 for a clean guest shutdown,
+# nonzero for qemu itself failing) so a caller (MacRenkuOS.app's launcher)
+# can tell a corrupted disk apart from an ordinary exit.
+finish() {
+	kill "$PANIC_WATCHDOG_PID" 2>/dev/null
+	wait "$PANIC_WATCHDOG_PID" 2>/dev/null
+	if [ -f "$PANIC_MARKER" ]; then
+		rm -f "$PANIC_MARKER"
+		exit 42
+	fi
+	exit "$1"
+}
+
 # --clipboard needs to clean up its background sync loop once qemu exits;
 # every other mode just waits for the PID the watchdog above settled on,
 # propagating its exit status like `exec` used to.
 if [ "$CLIPBOARD" = "0" ]; then
 	wait "$QEMU_PID"
-	exit $?
+	finish $?
 fi
 
 clipboard_sync_loop() {
@@ -386,3 +509,4 @@ trap cleanup_clipboard EXIT
 echo "clipboard: syncing with the Mac (ssh key: ${RENKU_SSH_KEY:-$HOME/.ssh/id_ed25519})"
 
 wait "$QEMU_PID"
+finish $?

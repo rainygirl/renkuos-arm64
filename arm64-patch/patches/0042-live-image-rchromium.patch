@@ -1,0 +1,68 @@
+Subject: [PATCH] minimum arm64: ship R Chromium on the live image
+
+build-renku-arm64-iso.sh now builds two variants from the same patched
+tree: the USB install medium (unchanged -- 0041's post-install job fetches
+R Chromium there, once a real install has network) and a live medium that
+ships it already on the image, for running straight off the medium with
+no install and no network wait -- what MacRenkuOS.app boots.
+
+Adds `rchromium-154.0.8036.0-28` to the arm64 repository list, same as
+`rappmarket-1.0.0-4` right above it, but only pulls it onto the image
+(`AddHaikuImageSystemPackages rchromium`) when the build sets
+`RENKU_LIVE_BUILD=1` -- a jam variable the build script now passes with
+`-s`, read here as `$(RENKU_LIVE_BUILD)`. The install variant (the
+default) never requests it, so `AddRepositoryPackage`'s own silent-drop
+behavior (see 0014's note on the same thing happening to openssl3) just
+leaves it out of that build's local index; nothing needs its hpkg to be
+present in download/ unless RENKU_LIVE_BUILD=1 actually asks for it.
+
+That hpkg needs re-vendoring before it can sit in this local HaikuPorts-
+info repository at all: package_repo refuses a package whose vendor
+differs from the rest of it, the same constraint 0012's curl/wget and
+0020's rappmarket already hit, there worked around by rebuilding each one
+from its own recipe with the vendor forced to "Haiku Project". Rebuilding
+R Chromium from source the same way is a multi-hour native Chromium
+build, so build-renku-arm64-iso.sh instead re-vendors the already-built
+hpkg: extract it with the host `package` tool (built as `<build>package`,
+the same way jam builds any other host-side tool it needs), edit the
+vendor line in the `.PackageInfo` extraction writes out, and repack with
+that edited copy -- same binaries, only the metadata differs.
+
+diff --git a/build/jam/DefaultBuildProfiles b/build/jam/DefaultBuildProfiles
+index ef9a358f..3549af50 100644
+--- a/build/jam/DefaultBuildProfiles
++++ b/build/jam/DefaultBuildProfiles
+@@ -250,6 +250,18 @@ rule DefineDefaultBuildProfiles
+ 					;
+ 			}
+
++			# R Chromium: only for the live medium (RENKU_LIVE_BUILD=1, set
++			# by build-renku-arm64-iso.sh), which ships it on the image
++			# instead of leaving it for 0041's post-install job to fetch.
++			# Needs the hpkg re-vendored to "Haiku Project" and staged into
++			# download/ first -- see build-renku-arm64-iso.sh's own
++			# "Staging R Chromium for the live image" step.
++			if $(TARGET_PACKAGING_ARCH) = arm64 && $(RENKU_LIVE_BUILD) = 1 {
++				AddHaikuImageSystemPackages
++					rchromium
++					;
++			}
++
+ 			# The image translators. The minimum profile ships STXTTranslator
+ 			# alone, so ShowImage opened nothing and a picture chosen as the
+ 			# desktop background was never drawn. JPEG, PNG, WebP and AVIF
+diff --git a/build/jam/repositories/HaikuPorts/arm64 b/build/jam/repositories/HaikuPorts/arm64
+index d08dd60c..fb5ba78b 100644
+--- a/build/jam/repositories/HaikuPorts/arm64
++++ b/build/jam/repositories/HaikuPorts/arm64
+@@ -74,6 +74,10 @@ RemotePackageRepository HaikuPorts
+ 	openssh-10.4p1-1
+ 	# R AppMarket -- published in RENKU Apps, same as curl/gzip/tar/wget above.
+ 	rappmarket-1.0.0-4
++	# R Chromium -- published in RENKU Apps, re-vendored to "Haiku Project"
++	# at build time (see build-renku-arm64-iso.sh); only pulled onto the
++	# image when RENKU_LIVE_BUILD=1 (see DefaultBuildProfiles).
++	rchromium-154.0.8036.0-28
+ 	# The image translators, prebuilt against haikuwebkit's libjpeg-turbo,
+ 	# libpng and libwebp and libavif1.0's libavif (see DefaultBuildProfiles).
+ 	renku_imagetranslators-1.0.0-1

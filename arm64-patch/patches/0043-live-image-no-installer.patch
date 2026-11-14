@@ -1,0 +1,51 @@
+Subject: [PATCH] minimum arm64: drop Installer from the live medium
+
+The live medium (`RENKU_LIVE_BUILD=1`) is meant to be run straight off the
+medium -- that is the whole point of splitting it from the USB install
+medium in `0042`. Installer has nothing to do there: there is no install
+to make.
+
+Filters "Installer" out of both `SYSTEM_APPS` and `DESKBAR_APPLICATIONS`
+when `RENKU_LIVE_BUILD=1`, the same jam variable `0042` already gates R
+Chromium's inclusion on. `data/launch/user`'s own create-installer-link
+job (the one that puts an Installer shortcut on the Desktop on a
+read-only/live boot) already gates on `file_exists /boot/system/apps/
+Installer`, so dropping the binary here is enough on its own to stop that
+shortcut from appearing too -- no change needed there.
+
+diff --git a/build/jam/images/definitions/minimum b/build/jam/images/definitions/minimum
+index 9c6fd187..71cb51ab 100644
+--- a/build/jam/images/definitions/minimum
++++ b/build/jam/images/definitions/minimum
+@@ -160,6 +160,31 @@ DESKBAR_APPLICATIONS =
+ 	Terminal
+ ;
+
++# The live medium (RENKU_LIVE_BUILD=1, set by build-renku-arm64-iso.sh) is
++# meant to be run straight off the medium, never installed from -- that is
++# what the separate USB install medium is for. Installer has nothing to do
++# there, so it comes off both lists; data/launch/user's own
++# create-installer-link job already gates on file_exists, so dropping it
++# here is enough to stop that desktop shortcut from appearing too.
++if $(RENKU_LIVE_BUILD) = 1 {
++	local filteredSystemApps ;
++	local app ;
++	for app in $(SYSTEM_APPS) {
++		if $(app) != Installer {
++			filteredSystemApps += $(app) ;
++		}
++	}
++	SYSTEM_APPS = $(filteredSystemApps) ;
++
++	local filteredDeskbarApps ;
++	for app in $(DESKBAR_APPLICATIONS) {
++		if $(app) != Installer {
++			filteredDeskbarApps += $(app) ;
++		}
++	}
++	DESKBAR_APPLICATIONS = $(filteredDeskbarApps) ;
++}
++
+ DESKBAR_DESKTOP_APPLETS =
+ 	NetworkStatus
+ 	ProcessController

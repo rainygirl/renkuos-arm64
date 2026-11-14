@@ -39,6 +39,17 @@ why -- is in [`AGENTS.md`](AGENTS.md) and [`arm64-patch/README.md`](arm64-patch/
 
 ## Current ISO
 
+Two variants come out of the same patched tree (see `0042` in
+[`arm64-patch/README.md`](arm64-patch/README.md)):
+
+- `renku-arm64.iso` -- the USB install medium. Write it to a USB stick and
+  install from it onto a disk; R Chromium comes later, fetched by the
+  installed system's own first boot once it has network (`0041`).
+- `renku-arm64-live.iso` -- the same image with R Chromium already on it,
+  so Installer carries it straight onto the target disk with everything
+  else. This is the one [MacRenkuOS.app](macapp/) downloads and installs
+  from.
+
 The ISO built from RenkuOS/Source commit `8484655099aae479b59590d098dfcbf6fdc4d908`
 is `renku-arm64.iso` (SHA-256:
 `a17e71567b58539af254746c6c3fad4df79331d9cb0ff183bfc50de114c06168`).
@@ -47,16 +58,20 @@ is `renku-arm64.iso` (SHA-256:
 ## Building the ISO
 
 ```sh
-./build-renku-arm64-iso.sh              # -> ./renku-arm64.iso
+./build-renku-arm64-iso.sh                                          # -> ./renku-arm64.iso (USB install)
+RENKU_LIVE_BUILD=1 ./build-renku-arm64-iso.sh renku-arm64-live.iso   # -> ./renku-arm64-live.iso (R Chromium included)
 ```
 
 First run takes a few hours, most of it the cross-toolchain. Once it exists:
 
 ```sh
 SKIP_CROSS_TOOLS=1 ./build-renku-arm64-iso.sh
+SKIP_CROSS_TOOLS=1 RENKU_LIVE_BUILD=1 ./build-renku-arm64-iso.sh renku-arm64-live.iso
 ```
 
-reuses it and takes much less time.
+reuses it and takes much less time -- building both variants only redoes
+the image-assembly step, not the compile, since that is all that differs
+between them.
 
 ## Trying it in QEMU
 

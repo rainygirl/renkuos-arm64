@@ -40,6 +40,15 @@ arm64 포팅 자체를 패치하는 건 없습니다. 이 디렉터리가 더하
 
 ## 현재 ISO
 
+같은 패치 트리에서 두 가지 변형이 나옵니다 ([`arm64-patch/README.ko.md`](arm64-patch/README.ko.md)의
+`0042` 참고):
+
+- `renku-arm64.iso` -- USB 설치 매체. USB에 써서 디스크에 설치하면, 설치된
+  시스템이 네트워크가 생긴 첫 부팅에서 R Chromium을 직접 받아옵니다(`0041`).
+- `renku-arm64-live.iso` -- R Chromium이 이미 포함된 같은 이미지. Installer가
+  다른 패키지들과 함께 그대로 타겟 디스크로 옮겨줍니다. [MacRenkuOS.app](macapp/)이
+  내려받아 설치에 쓰는 바로 그 ISO입니다.
+
 RenkuOS/Source 커밋 `8484655099aae479b59590d098dfcbf6fdc4d908`에서 빌드한
 `renku-arm64.iso`의 SHA-256은
 `a17e71567b58539af254746c6c3fad4df79331d9cb0ff183bfc50de114c06168`입니다.
@@ -48,16 +57,19 @@ RenkuOS/Source 커밋 `8484655099aae479b59590d098dfcbf6fdc4d908`에서 빌드한
 ## ISO 빌드
 
 ```sh
-./build-renku-arm64-iso.sh              # -> ./renku-arm64.iso
+./build-renku-arm64-iso.sh                                          # -> ./renku-arm64.iso (USB 설치용)
+RENKU_LIVE_BUILD=1 ./build-renku-arm64-iso.sh renku-arm64-live.iso   # -> ./renku-arm64-live.iso (R Chromium 포함)
 ```
 
 첫 실행은 몇 시간 걸리고 대부분이 크로스 툴체인입니다. 한 번 만들어지면:
 
 ```sh
 SKIP_CROSS_TOOLS=1 ./build-renku-arm64-iso.sh
+SKIP_CROSS_TOOLS=1 RENKU_LIVE_BUILD=1 ./build-renku-arm64-iso.sh renku-arm64-live.iso
 ```
 
-로 재사용해서 훨씬 빨리 끝납니다.
+로 재사용해서 훨씬 빨리 끝납니다 -- 두 변형을 모두 빌드해도 컴파일은 다시 하지
+않고 이미지 조립 단계만 다시 하는데, 둘의 차이가 바로 그 단계뿐이기 때문입니다.
 
 ## QEMU로 띄워보기
 
