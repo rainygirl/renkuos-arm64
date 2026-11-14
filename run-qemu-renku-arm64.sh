@@ -7,10 +7,13 @@
 #   ./run-qemu-renku-arm64.sh --install      boot the ISO with the disk attached,
 #                                       to partition and install with it
 #   ./run-qemu-renku-arm64.sh --live          boot renku-arm64-live.iso alone, no
-#                                       disk at all -- that medium has no
-#                                       Installer on it (see arm64-patch's
+#                                       separate disk at all -- that medium has
+#                                       no Installer on it (see arm64-patch's
 #                                       0042/0043), only R Chromium already
-#                                       included; what MacRenkuOS.app runs
+#                                       included; what MacRenkuOS runs. Writes
+#                                       land in a qcow2 overlay next to the ISO
+#                                       that persists across runs (delete it to
+#                                       reset to a pristine live session)
 #   ./run-qemu-renku-arm64.sh --headless     no window; QMP control socket only
 #   ./run-qemu-renku-arm64.sh --tcg          force emulation over hvf
 #   ./run-qemu-renku-arm64.sh --bridged      add a second NIC on the real LAN
@@ -41,9 +44,15 @@
 #     down from inside the guest (Deskbar > Shut Down, or `shutdown`) ends
 #     QEMU by itself through PSCI, which RenkuOS/Source has had since
 #     024aeb68a7; an older tree stops at "safe to turn off" instead.
-#   - RENKU_AUDIO=none swaps the CoreAudio backend for silence; with
-#     CoreAudio, a recording app only gets samples if the terminal running
-#     this has microphone permission in macOS System Settings.
+#   - RENKU_AUDIO=none swaps the CoreAudio backend for silence.
+#   - The HDA codec defaults to output-only (hda-output): the duplex codec
+#     (hda-duplex, line-out + line-in) makes CoreAudio open the input side
+#     too, which fails outright with "Can not open `adc' (no host audio
+#     driver)" when the process running this (Terminal, or whatever ran
+#     the curl|bash one-liner) has no microphone permission in macOS
+#     System Settings -- not something most people running this have
+#     granted. RENKU_MIC=1 switches back to hda-duplex for a guest
+#     recording app, once that permission is granted.
 #
 # Bridged networking (--bridged):
 #   The default NIC is QEMU usermode NAT (hostfwd tcp::2222-:22) -- the guest
@@ -99,6 +108,8 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 DISK="${RENKU_DISK:-$DIR/renku-arm64-vm.img}"
 ISO="${RENKU_ISO:-$DIR/renku-arm64.iso}"
+HDA_CODEC="hda-output"
+[ "${RENKU_MIC:-0}" = "1" ] && HDA_CODEC="hda-duplex"
 
 INSTALL=0; LIVE=0; HEADLESS=0; FORCE_TCG=0; BRIDGED=0; CLIPBOARD=0; FULLSCREEN=1
 for a in "$@"; do
@@ -142,7 +153,7 @@ if [ "$LIVE" = "0" ] && pgrep -f "qemu-system-aarch64.*$DISK" >/dev/null 2>&1; t
 	exit 1
 fi
 if [ "$LIVE" = "1" ] && pgrep -f "qemu-system-aarch64.*renku-arm64-live-overlay.qcow2" >/dev/null 2>&1; then
-	echo "a --live session is already running -- its overlay would get recreated out from under it" >&2
+	echo "a --live session is already running against the same overlay -- two instances on it will corrupt it" >&2
 	exit 1
 fi
 
@@ -185,17 +196,24 @@ if [ "$LIVE" = "1" ]; then
 		echo "live medium not found: $ISO -- build it with RENKU_LIVE_BUILD=1 ./build-renku-arm64-iso.sh renku-arm64-live.iso" >&2
 		exit 1
 	fi
-	# No disk at all: the live medium has no Installer on it (see
+	# No separate disk: the live medium has no Installer on it (see
 	# arm64-patch's 0043) and is never installed from, only booted -- same
 	# qcow2-overlay-over-the-ISO trick as --install, minus the second
-	# controller and disk a real install would need.
+	# controller and disk a real install would need. Unlike --install's own
+	# overlay below (genuinely scratch -- the real install target is
+	# $DISK, a separate file), this overlay is the only writable storage
+	# the live session has at all, so it is kept across runs rather than
+	# recreated every time: wiping it on every launch would silently discard
+	# anything the guest wrote (R Chromium's profile, saved files, ...).
+	# Delete it by hand to go back to a pristine live session.
 	ISO_OVERLAY="$(dirname "$DISK")/renku-arm64-live-overlay.qcow2"
-	rm -f "$ISO_OVERLAY"
-	qemu-img create -f qcow2 -F raw -b "$ISO" "$ISO_OVERLAY" >/dev/null \
-		|| { echo "could not create a qcow2 overlay for $ISO" >&2; exit 1; }
+	if [ ! -f "$ISO_OVERLAY" ]; then
+		qemu-img create -f qcow2 -F raw -b "$ISO" "$ISO_OVERLAY" >/dev/null \
+			|| { echo "could not create a qcow2 overlay for $ISO" >&2; exit 1; }
+	fi
 	MEDIA=(-drive file="$ISO_OVERLAY",if=none,id=drv0,format=qcow2
 	       -device usb-storage,bus=usb.0,drive=drv0)
-	echo "medium:   $ISO (live, via a throwaway qcow2 overlay, no disk attached)"
+	echo "medium:   $ISO (live, writes persist in $ISO_OVERLAY -- delete it to reset)"
 elif [ "$INSTALL" = "1" ]; then
 	if [ ! -f "$ISO" ]; then
 		echo "installer medium not found: $ISO -- building it now (this can take a while)" >&2
@@ -297,7 +315,7 @@ qemu_args_for() {
 		-device usb-tablet,bus=usb.0
 	printf '%s\n' "${NET_ARGS[@]}"
 	printf '%s\n' \
-		-audiodev "${RENKU_AUDIO:-coreaudio}",id=snd0 -device intel-hda -device hda-duplex,audiodev=snd0 \
+		-audiodev "${RENKU_AUDIO:-coreaudio}",id=snd0 -device intel-hda -device "$HDA_CODEC",audiodev=snd0 \
 		-qmp unix:"$QMP",server,nowait
 	printf '%s\n' "${DISPLAY_ARGS[@]}"
 	if [ -n "${HOLD_ARGS+set}" ] && [ "${#HOLD_ARGS[@]}" -gt 0 ]; then

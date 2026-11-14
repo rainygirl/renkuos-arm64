@@ -136,7 +136,11 @@ Settled by hitting the failure, not preference:
   install procedure's one real requirement, confirmed by reproducing the
   failure twice: forcing QEMU closed (`quit` over QMP, or just closing the
   window) right after `Installer` finishes or right after copying the EFI
-  loader leaves Haiku's write-back cache unflushed. On the next boot:
+  loader leaves Haiku's write-back cache unflushed. `--live`'s own qcow2
+  overlay now persists across runs too (it used to be recreated fresh
+  every launch, discarding writes on purpose), so it is exactly as exposed
+  to this as an installed disk -- the same clean-shutdown requirement now
+  applies to it as well. On the next boot:
   - The copied `BOOTAA64.EFI` can come up corrupted (byte-identical in
     size, different MD5) -- the EFI Shell reports `Command Error Status:
     Unsupported` trying to load it.
