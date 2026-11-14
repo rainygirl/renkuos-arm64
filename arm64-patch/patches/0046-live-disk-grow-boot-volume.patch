@@ -1,0 +1,486 @@
+Subject: [PATCH] live disk: the boot volume grows to fill the whole virtual disk
+
+The live image is a 300 MiB BFS partition followed by a 2.8 MiB EFI system
+partition. MacRenkuOS boots it from a qcow2 overlay, and /boot stayed
+300 MiB with about 10 MiB free whatever size that overlay had -- small
+enough that R Chromium's shared memory, which lives in /tmp on the boot
+volume, ran out for a single large frame. Shipping a 16 GiB image instead
+would put 16 GiB on every download; the overlay's extra space costs nothing
+until it is written.
+
+Two halves, because BFS cannot be resized (ResizeVisitor is a stub that
+returns B_NOT_SUPPORTED) and a mounted boot volume is no place to start:
+
+- renku_grow_boot, run with --restart by a new renku-grow-boot job in
+  data/launch/user's desktop target, recognises the live disk layout (an
+  ISO 9660 hybrid whose MBR holds BFS, then the ESP right after it, and
+  nothing else), copies the ESP to the end of the disk, verifies the copy,
+  rewrites the MBR so the BFS partition reaches up to it, writes
+  "grow_to_partition true" to ~/config/settings/kernel/drivers/bfs, says so
+  in an alert and restarts. Neither the ESP nor the partition table is in
+  use while the system runs. On any other layout, or once the disk is
+  grown, it does nothing. (It is called directly rather than through a
+  script in /boot/system/boot: files added to "system boot" at the end of
+  the minimum image definition do not reach this image -- 0041's
+  renku-install-rchromium is missing from it for the same reason.)
+
+- BFS's Volume::Mount(), when that setting is on and the partition is larger
+  than the file system, grows the file system before the journal, block
+  cache and allocator are set up (_GrowToPartition). The bitmap follows
+  block 0 and the log follows the bitmap, and BFS treats everything up to
+  the end of the log as reserved -- inode checks and the allocator both
+  rely on it -- so the log keeps its end and the larger bitmap takes its
+  first blocks: from 300 MiB to 16 GiB with 2 KiB blocks, the log goes from
+  2048 to 1546 blocks. Nothing else moves and no block changes hands. This
+  needs a clean log; a dirty one, an unexpected layout or a log that would
+  drop under 512 blocks leaves the volume as it is. The new bitmap blocks
+  are written first (over the clean log only) and the superblock last, so
+  an interruption leaves the old volume intact.
+
+The boot loader hands ~/config/settings/kernel/drivers/* to the kernel, so
+the setting reaches BFS before the boot volume is mounted.
+
+diff --git a/build/jam/images/definitions/minimum b/build/jam/images/definitions/minimum
+index 5f81fe7950..967f876a2c 100644
+--- a/build/jam/images/definitions/minimum
++++ b/build/jam/images/definitions/minimum
+@@ -86,6 +86,7 @@ SYSTEM_BIN = [ FFilterByBuildFeatures
+ 	reindex
+ 	release
+ 	renice
++	renku_grow_boot
+ 	resattr
+ 	resizefs
+ 	rmattr
+diff --git a/data/launch/user b/data/launch/user
+index 7cef7f2c2b..4e8123998a 100644
+--- a/data/launch/user
++++ b/data/launch/user
+@@ -67,6 +67,15 @@ target desktop {
+ 		on network_available
+ 	}
+ 
++	job renku-grow-boot {
++		# The RENKU live disk is a 300 MiB image at the start of a larger
++		# virtual disk: give its boot volume the rest (renku_grow_boot does
++		# nothing on any other layout, or once it is done). Its notice
++		# needs app_server only; "requires x-vnd.Be-TSKB" kept the job
++		# waiting for good.
++		launch /bin/renku_grow_boot --restart
++	}
++
+ 	job create-installer-link {
+ 		# When run from a read-only medium a.k.a. live desktop
+ 		if {
+diff --git a/src/add-ons/kernel/file_systems/bfs/Volume.cpp b/src/add-ons/kernel/file_systems/bfs/Volume.cpp
+index e3261ce7c9..f0dae5404a 100644
+--- a/src/add-ons/kernel/file_systems/bfs/Volume.cpp
++++ b/src/add-ons/kernel/file_systems/bfs/Volume.cpp
+@@ -215,6 +215,19 @@ Volume::Mount(const char* deviceName, uint32 flags)
+ 		RETURN_ERROR(B_BAD_VALUE);
+ 	}
+ 
++#ifndef FS_SHELL
++	// RENKU: a volume whose partition was enlarged grows into it here, before
++	// anything below reads the superblock's size -- see _GrowToPartition().
++	if (!opener.IsReadOnly() && diskSize > (NumBlocks() << BlockShift())) {
++		void* settings = load_driver_settings("bfs");
++		bool grow = get_driver_boolean_parameter(settings, "grow_to_partition",
++			false, true);
++		unload_driver_settings(settings);
++		if (grow)
++			_GrowToPartition(diskSize);
++	}
++#endif
++
+ 	// set the current log pointers, so that journaling will work correctly
+ 	fLogStart = fSuperBlock.LogStart();
+ 	fLogEnd = fSuperBlock.LogEnd();
+@@ -403,6 +416,114 @@ Volume::AllocateForInode(Transaction& transaction, const Inode* parent,
+ }
+ 
+ 
++
++#ifndef FS_SHELL
++/*!	RENKU: makes the file system as large as its partition, at mount time.
++
++	BFS cannot be resized (ResizeVisitor is a stub), and the RENKU live disk is
++	a 300 MiB BFS partition at the start of a 16 GiB virtual disk. Once
++	renku_grow_boot has stretched the partition, this stretches the file
++	system to match, before the journal, the block cache and the allocator
++	are set up -- nothing else has the volume open yet, so there is no
++	running state to keep consistent.
++
++	The block bitmap starts at block 1 and the log follows it directly; BFS
++	treats everything up to the end of the log as reserved (inode checks,
++	the allocator), so the log has to stay where it ends. A larger bitmap
++	therefore takes the first blocks of the log, and the log becomes that
++	much shorter: for 300 MiB to 16 GiB with 2 KiB blocks, 502 of its 2048
++	blocks. Nothing else moves and no block changes hands, so the count of
++	used blocks stays as it is. That is only safe with a clean log (nothing
++	to replay); a dirty log, an unexpected layout, or a log that would end up
++	shorter than 512 blocks leaves the volume as it is.
++
++	The new bitmap blocks are written first -- they overwrite only the old,
++	clean log -- and the superblock last, so an interruption leaves the old
++	volume intact.
++*/
++status_t
++Volume::_GrowToPartition(off_t partitionSize)
++{
++	disk_super_block superBlock = fSuperBlock;
++	const uint32 blockSize = BlockSize();
++	const int32 bitsPerBlock = blockSize * 8;
++	const off_t oldBlocks = superBlock.NumBlocks();
++	const off_t newBlocks = partitionSize >> BlockShift();
++
++	if (newBlocks - oldBlocks < 8192)
++		return B_OK;
++	if (superBlock.LogStart() != superBlock.LogEnd()) {
++		INFORM(("bfs: not growing %s: the log needs replaying first\n",
++			superBlock.name));
++		return B_BUSY;
++	}
++
++	const off_t oldBitmap = divide_roundup(oldBlocks, bitsPerBlock);
++	const off_t newBitmap = divide_roundup(newBlocks, bitsPerBlock);
++	block_run oldLog = superBlock.log_blocks;
++	const off_t logStart = ToBlock(oldLog);
++	const off_t logEnd = logStart + oldLog.Length();
++	const off_t newLogStart = 1 + newBitmap;
++	const off_t newLogLength = logEnd - newLogStart;
++	const off_t groupBlocks = 1LL << AllocationGroupShift();
++	if (logStart != 1 + oldBitmap || newLogLength < 512
++		|| newLogStart / groupBlocks != (logEnd - 1) / groupBlocks) {
++		INFORM(("bfs: not growing %s: unexpected layout\n", superBlock.name));
++		return B_NOT_SUPPORTED;
++	}
++
++	const size_t bitmapBytes = newBitmap * blockSize;
++	uint32* bitmap = (uint32*)malloc(bitmapBytes);
++	if (bitmap == NULL)
++		return B_NO_MEMORY;
++	MemoryDeleter bitmapDeleter(bitmap);
++	memset(bitmap, 0, bitmapBytes);
++
++	const size_t oldBitmapBytes = oldBitmap * blockSize;
++	if (read_pos(fDevice, blockSize, bitmap, oldBitmapBytes)
++			!= (ssize_t)oldBitmapBytes)
++		return B_IO_ERROR;
++
++	// Every block from 0 to the end of the log is already marked used, and
++	// stays used (superblock, bitmap, log). Past the old end nothing is.
++	for (off_t block = oldBlocks; block < newBlocks; block++) {
++		bitmap[block >> 5]
++			&= ~HOST_ENDIAN_TO_BFS_INT32(1UL << (block % 32));
++	}
++
++	// from the old last bitmap block on: the old one again, then what was
++	// the first part of the (clean) log
++	const off_t first = oldBlocks / bitsPerBlock;
++	const size_t bytes = (newBitmap - first) * blockSize;
++	if (write_pos(fDevice, (1 + first) * blockSize,
++			(uint8*)bitmap + first * blockSize, bytes) != (ssize_t)bytes)
++		return B_IO_ERROR;
++	ioctl(fDevice, B_FLUSH_DRIVE_CACHE);
++
++	superBlock.num_blocks = HOST_ENDIAN_TO_BFS_INT64(newBlocks);
++	superBlock.num_ags = HOST_ENDIAN_TO_BFS_INT32(
++		divide_roundup(newBlocks, (int32)groupBlocks));
++	superBlock.log_blocks = ToBlockRun(newLogStart);
++	superBlock.log_blocks.length = HOST_ENDIAN_TO_BFS_INT16(newLogLength);
++	superBlock.log_start = superBlock.log_end
++		= HOST_ENDIAN_TO_BFS_INT64(newLogStart);
++	if (!superBlock.IsValid())
++		return B_BAD_DATA;
++
++	if (write_pos(fDevice, 512, &superBlock, sizeof(disk_super_block))
++			!= sizeof(disk_super_block))
++		return B_IO_ERROR;
++	ioctl(fDevice, B_FLUSH_DRIVE_CACHE);
++	fSuperBlock = superBlock;
++
++	dprintf("bfs: grew \"%s\" from %" B_PRIdOFF " to %" B_PRIdOFF
++		" blocks to fill its partition (log %" B_PRIdOFF " -> %" B_PRIdOFF
++		" blocks)\n", superBlock.name, oldBlocks, newBlocks,
++		logEnd - logStart, newLogLength);
++	return B_OK;
++}
++#endif	// !FS_SHELL
++
+ status_t
+ Volume::WriteSuperBlock()
+ {
+diff --git a/src/add-ons/kernel/file_systems/bfs/Volume.h b/src/add-ons/kernel/file_systems/bfs/Volume.h
+index 245bf8202d..7a6685942d 100644
+--- a/src/add-ons/kernel/file_systems/bfs/Volume.h
++++ b/src/add-ons/kernel/file_systems/bfs/Volume.h
+@@ -149,6 +149,7 @@ public:
+ 
+ private:
+ 			status_t		_EraseUnusedBootBlock();
++			status_t		_GrowToPartition(off_t partitionSize);
+ 
+ protected:
+ 			fs_volume*		fVolume;
+diff --git a/src/bin/Jamfile b/src/bin/Jamfile
+index 5214328c81..453de83cc9 100644
+--- a/src/bin/Jamfile
++++ b/src/bin/Jamfile
+@@ -47,6 +47,7 @@ StdBinCommands
+ 	ps.c
+ 	release.c
+ 	renice.c
++	renku_grow_boot.cpp
+ 	rescan.c
+ 	system_time.cpp
+ 	unchop.c
+diff --git a/src/bin/renku_grow_boot.cpp b/src/bin/renku_grow_boot.cpp
+new file mode 100644
+index 0000000000..ab7a164b05
+--- /dev/null
++++ b/src/bin/renku_grow_boot.cpp
+@@ -0,0 +1,243 @@
++/*
++ * Copyright 2026, RENKU.
++ * Distributed under the terms of the MIT License.
++ *
++ * renku_grow_boot -- give the RENKU live disk's boot volume the whole disk.
++ *
++ * The live medium is an image with a 300 MiB BFS partition followed by a
++ * small EFI system partition. MacRenkuOS boots it from a qcow2 overlay whose
++ * virtual size is 16 GiB, so everything after the image is empty disk. This
++ * moves the EFI system partition to the end of the disk and stretches the
++ * BFS partition up to it; BFS itself grows into the larger partition the
++ * next time it is mounted (grow_to_partition in the "bfs" driver settings,
++ * written here). Only the partition table and the ESP are touched while the
++ * system runs from the disk: neither is in use.
++ *
++ * Exit status: 0 nothing to do, 2 the disk was changed and the system needs
++ * a restart, 1 error. With --restart (what the login job passes), a change
++ * is followed by a notice and the restart itself.
++ */
++
++
++#include <Drivers.h>
++#include <fs_info.h>
++
++#include <errno.h>
++#include <fcntl.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/stat.h>
++#include <unistd.h>
++
++
++static const char* kSettingsDir = "/boot/home/config/settings/kernel/drivers";
++static const char* kSettingsFile
++	= "/boot/home/config/settings/kernel/drivers/bfs";
++static const uint32 kSectorSize = 512;
++static const uint32 kAlignment = 2048;
++	// sectors: 1 MiB
++static const uint32 kMinimumGain = 131072;
++	// sectors: below 64 MiB, leave the disk alone
++
++
++struct mbr_entry {
++	uint8	status;
++	uint8	chsFirst[3];
++	uint8	type;
++	uint8	chsLast[3];
++	uint32	start;
++	uint32	count;
++} __attribute__((packed));
++
++
++static uint32
++le32(const uint8* p)
++{
++	return p[0] | (p[1] << 8) | (p[2] << 16) | ((uint32)p[3] << 24);
++}
++
++
++static bool
++write_settings()
++{
++	char path[B_PATH_NAME_LENGTH];
++	strlcpy(path, kSettingsDir, sizeof(path));
++	for (char* slash = strchr(path + 1, '/'); slash != NULL;
++			slash = strchr(slash + 1, '/')) {
++		*slash = '\0';
++		mkdir(path, 0755);
++		*slash = '/';
++	}
++	mkdir(path, 0755);
++
++	FILE* file = fopen(kSettingsFile, "w");
++	if (file == NULL)
++		return false;
++	fputs("# Written by renku_grow_boot: BFS grows a volume to fill its\n"
++		"# partition when the partition is larger than the file system.\n"
++		"grow_to_partition true\n", file);
++	fclose(file);
++	return true;
++}
++
++
++static bool
++copy_sectors(int fd, off_t from, off_t to, off_t count)
++{
++	const size_t chunk = 128 * kSectorSize;
++	uint8* buffer = (uint8*)malloc(chunk);
++	uint8* check = (uint8*)malloc(chunk);
++	if (buffer == NULL || check == NULL)
++		return false;
++
++	bool ok = true;
++	for (off_t done = 0; done < count && ok; ) {
++		size_t bytes = chunk;
++		if ((off_t)(bytes / kSectorSize) > count - done)
++			bytes = (count - done) * kSectorSize;
++		off_t source = (from + done) * kSectorSize;
++		off_t target = (to + done) * kSectorSize;
++		ok = read_pos(fd, source, buffer, bytes) == (ssize_t)bytes
++			&& write_pos(fd, target, buffer, bytes) == (ssize_t)bytes
++			&& read_pos(fd, target, check, bytes) == (ssize_t)bytes
++			&& memcmp(buffer, check, bytes) == 0;
++		done += bytes / kSectorSize;
++	}
++	free(buffer);
++	free(check);
++	return ok;
++}
++
++
++static int grow();
++
++
++int
++main(int argc, char** argv)
++{
++	int status = grow();
++	if (status == 2 && argc > 1 && strcmp(argv[1], "--restart") == 0) {
++		system("alert --info \"RenkuOS is giving its disk the whole virtual "
++			"drive. It restarts once to finish.\" \"Restart\"");
++		execl("/bin/shutdown", "shutdown", "-r", (char*)NULL);
++	}
++	return status;
++}
++
++
++static int
++grow()
++{
++	fs_info info;
++	if (fs_stat_dev(dev_for_path("/boot"), &info) != 0) {
++		fprintf(stderr, "renku_grow_boot: cannot stat /boot\n");
++		return 1;
++	}
++
++	// "/dev/disk/usb/0/0/0" -> "/dev/disk/usb/0/0/raw"
++	char raw[B_PATH_NAME_LENGTH];
++	strlcpy(raw, info.device_name, sizeof(raw));
++	char* slash = strrchr(raw, '/');
++	if (slash == NULL || strcmp(slash + 1, "0") != 0) {
++		printf("renku_grow_boot: /boot is not the first partition of a disk "
++			"(%s), nothing to do\n", info.device_name);
++		return 0;
++	}
++	strlcpy(slash + 1, "raw", sizeof(raw) - (slash + 1 - raw));
++
++	int fd = open(raw, O_RDWR);
++	if (fd < 0) {
++		fprintf(stderr, "renku_grow_boot: cannot open %s: %s\n", raw,
++			strerror(errno));
++		return 1;
++	}
++
++	device_geometry geometry;
++	if (ioctl(fd, B_GET_GEOMETRY, &geometry, sizeof(geometry)) != 0
++		|| geometry.bytes_per_sector != kSectorSize) {
++		fprintf(stderr, "renku_grow_boot: unexpected geometry of %s\n", raw);
++		close(fd);
++		return 1;
++	}
++	off_t diskSectors = (off_t)geometry.cylinder_count
++		* geometry.sectors_per_track * geometry.head_count;
++	if (diskSectors > 0xffffffffLL)
++		diskSectors = 0xffffffffLL;
++
++	uint8 sector[kSectorSize];
++	uint8 cd001[6];
++	if (read_pos(fd, 0, sector, sizeof(sector)) != sizeof(sector)
++		|| read_pos(fd, 0x8000, cd001, sizeof(cd001)) != sizeof(cd001)) {
++		fprintf(stderr, "renku_grow_boot: cannot read %s\n", raw);
++		close(fd);
++		return 1;
++	}
++
++	// Only the RENKU live image: a hybrid ISO (ISO 9660 at 32 KiB) whose MBR
++	// has BFS first, the ESP right after it, and nothing else.
++	mbr_entry* entries = (mbr_entry*)(sector + 446);
++	mbr_entry& bfs = entries[0];
++	mbr_entry& esp = entries[1];
++	if (sector[510] != 0x55 || sector[511] != 0xaa
++		|| memcmp(cd001 + 1, "CD001", 5) != 0
++		|| bfs.type != 0xeb || esp.type != 0xef
++		|| entries[2].type != 0 || entries[3].type != 0
++		|| le32((uint8*)&esp.start) != le32((uint8*)&bfs.start)
++			+ le32((uint8*)&bfs.count)) {
++		printf("renku_grow_boot: %s is not the live disk layout, nothing to "
++			"do\n", raw);
++		close(fd);
++		return 0;
++	}
++
++	const uint32 bfsStart = le32((uint8*)&bfs.start);
++	const uint32 espStart = le32((uint8*)&esp.start);
++	const uint32 espCount = le32((uint8*)&esp.count);
++	const uint32 newEspStart
++		= (uint32)((diskSectors - espCount) / kAlignment * kAlignment);
++
++	if (newEspStart <= espStart || newEspStart - espStart < kMinimumGain) {
++		// Already grown, or a disk with no room: make sure BFS will still
++		// fill the partition (a crash after the move, before the setting)
++		if (access(kSettingsFile, F_OK) != 0 && newEspStart > espStart)
++			write_settings();
++		printf("renku_grow_boot: the boot partition already fills %s\n", raw);
++		close(fd);
++		return 0;
++	}
++
++	printf("renku_grow_boot: moving the EFI partition from sector %u to %u, "
++		"growing the boot partition to %u MiB\n", espStart, newEspStart,
++		(unsigned)((uint64)(newEspStart - bfsStart) * kSectorSize >> 20));
++
++	// The settings first: should anything below fail half way, the next
++	// boot of the same layout tries again.
++	if (!write_settings()) {
++		fprintf(stderr, "renku_grow_boot: cannot write %s\n", kSettingsFile);
++		close(fd);
++		return 1;
++	}
++
++	if (!copy_sectors(fd, espStart, newEspStart, espCount)) {
++		fprintf(stderr, "renku_grow_boot: copying the EFI partition failed\n");
++		close(fd);
++		return 1;
++	}
++	ioctl(fd, B_FLUSH_DRIVE_CACHE);
++
++	// little endian on disk, and so is every Haiku target
++	uint32 bfsCount = newEspStart - bfsStart;
++	memcpy(&bfs.count, &bfsCount, 4);
++	memcpy(&esp.start, &newEspStart, 4);
++	if (write_pos(fd, 0, sector, sizeof(sector)) != sizeof(sector)) {
++		fprintf(stderr, "renku_grow_boot: writing the partition table "
++			"failed\n");
++		close(fd);
++		return 1;
++	}
++	ioctl(fd, B_FLUSH_DRIVE_CACHE);
++	close(fd);
++	sync();
++	return 2;
++}

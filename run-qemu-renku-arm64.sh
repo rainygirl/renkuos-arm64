@@ -206,10 +206,23 @@ if [ "$LIVE" = "1" ]; then
 	# recreated every time: wiping it on every launch would silently discard
 	# anything the guest wrote (R Chromium's profile, saved files, ...).
 	# Delete it by hand to go back to a pristine live session.
+	#
+	# The overlay is larger than the ISO (LIVE_DISK_GB, 16 by default): the
+	# space past the image costs nothing until written, and on its first
+	# login the guest moves the EFI partition to the end and grows /boot
+	# into the rest (arm64-patch's 0046). An overlay made before this was
+	# exactly the ISO's size; it is enlarged in place.
 	ISO_OVERLAY="$(dirname "$DISK")/renku-arm64-live-overlay.qcow2"
+	LIVE_DISK_GB="${LIVE_DISK_GB:-16}"
 	if [ ! -f "$ISO_OVERLAY" ]; then
-		qemu-img create -f qcow2 -F raw -b "$ISO" "$ISO_OVERLAY" >/dev/null \
+		qemu-img create -f qcow2 -F raw -b "$ISO" "$ISO_OVERLAY" "${LIVE_DISK_GB}G" >/dev/null \
 			|| { echo "could not create a qcow2 overlay for $ISO" >&2; exit 1; }
+	else
+		have="$(qemu-img info "$ISO_OVERLAY" | sed -n 's/^virtual size: .*(\([0-9]*\) bytes)$/\1/p')"
+		if [ -n "$have" ] && [ "$have" -lt $((LIVE_DISK_GB * 1024 * 1024 * 1024)) ]; then
+			qemu-img resize -q "$ISO_OVERLAY" "${LIVE_DISK_GB}G" \
+				|| echo "could not enlarge $ISO_OVERLAY to ${LIVE_DISK_GB}G" >&2
+		fi
 	fi
 	MEDIA=(-drive file="$ISO_OVERLAY",if=none,id=drv0,format=qcow2
 	       -device usb-storage,bus=usb.0,drive=drv0)
