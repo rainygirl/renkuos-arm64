@@ -73,6 +73,26 @@ static void StartGuest(void) {
         return;
     NSString* socketPath = [NSString stringWithUTF8String:path];
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        // EnterOverlay() just resized the view/window and called Refresh(),
+        // but that only *asks* QEMU's Cocoa UI thread to apply the new
+        // size and re-negotiate the virtio-gpu scanout's EDID-reported
+        // geometry -- it does not wait for that to actually finish. Only
+        // once it has is a brand-new guest that starts executing this
+        // instant guaranteed to see the same panel size it would at any
+        // later point. Sending "cont" immediately raced that: confirmed
+        // (a real MacBook Air, 2560x1664) crashing app_server with a
+        // segfault in memcpy during its very first desktop paint
+        // (Desktop::Init() -> HWInterface::_CopyToFront()) -- and
+        // confirmed fixed by isolating this exact gap: skipping only the
+        // -S hold (so the guest ran from power-on, never racing a resize
+        // in flight) booted cleanly every time at the same resolution,
+        // with the EDID override from EnterOverlay() still fully active.
+        // A short, fixed wait here is simpler than plumbing a real
+        // completion callback through QEMU's own Cocoa resize path (which
+        // this dylib has no hook into), and costs nothing worth noticing
+        // against the many seconds a boot already takes, or the 30 s
+        // fallback already tolerated below.
+        usleep(300000);
         int fd = socket(AF_UNIX, SOCK_STREAM, 0);
         if (fd < 0)
             return;

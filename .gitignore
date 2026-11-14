@@ -3,8 +3,14 @@
 *.iso
 *.image
 *.img
+*.qcow2
 serial.log
 serial-bridged.log
+
+# The macOS launcher app moved to its own repository
+# (renkuos-apps/MacRenkuOS, github.com/rainygirl/MacRenkuOS) -- this was
+# its old build output (.app/.dmg plus staged ISOs/disk images), not source.
+/macapp/
 
 # Cross-compiled per-architecture binaries -- regenerate with
 # appmarket/tools/cross-build.sh rather than committing these.

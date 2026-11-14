@@ -1,0 +1,120 @@
+Subject: [PATCH] app_server: pick the default UI scale from the display's pixel density
+
+When no font sizes have been chosen, app_server enlarges the default fonts
+(and with them controls, window borders, icons and the cursor, which all
+scale by the font size) on large screens. It decided by resolution alone:
+x1.5 above 1920x1080, x2 above 3840x2160. Resolution says nothing about
+density: a 27" 2560x1440 monitor (109 dpi) got x1.5 and crowded its own
+screen, a 13" 2560x1600 laptop panel (227 dpi) got x1.5 too and stayed
+tiny, and a 15" 3840x2160 panel (282 dpi) got x1.5 because the test was
+">", not ">=".
+
+Use the size the display reports in its EDID (monitor_info width/height,
+in cm) when there is one: scale = dpi / 110, in quarter steps between 1
+and 3. Displays without EDID keep the resolution rule (now inclusive of
+3840x2160). The decision is logged to the syslog.
+
+Ported from renkuos-apps/renku-retina (patch 0001), this port's own
+sibling project that packages this as rretina for pkgman install after
+boot. Folding it into arm64-patch bakes it into the image itself, so
+the correct scale is already picked by app_server's own first
+Desktop::Init() -- during the live ISO boot, before Installer ever
+opens, not only after a later pkgman install. Applies cleanly as-is to
+this port's pinned commit.
+
+diff -ru a/src/servers/app/Desktop.cpp b/src/servers/app/Desktop.cpp
+--- a/src/servers/app/Desktop.cpp	2026-10-09 23:08:39
++++ b/src/servers/app/Desktop.cpp	2026-10-09 23:11:38
+@@ -21,10 +21,13 @@
+ 
+ #include "Desktop.h"
+ 
++#include <math.h>
+ #include <stdio.h>
+ #include <string.h>
+ #include <syslog.h>
+ 
++#include <algorithm>
++
+ #include <Debug.h>
+ #include <debugger.h>
+ #include <DirectWindow.h>
+@@ -486,6 +489,49 @@
+ 
+ /*!	This method is allowed to throw exceptions.
+ */
++/*!	The factor the default fonts - and with them everything that scales by
++	the font size: controls, window borders, icons, the cursor - are scaled by
++	when the user has not chosen font sizes. It follows the display's pixel
++	density when the display tells its size (EDID), in steps of a quarter
++	between 1 and 3: 110 dpi is still comfortable at the unscaled 12 pt, so a
++	27" 2560x1440 panel (109 dpi) stays at 1, a 13" 2560x1600 one (227 dpi)
++	gets 2, and a 15" 3840x2160 one (282 dpi) 2.5. Displays without EDID (a
++	firmware frame buffer) fall back to the resolution alone.
++*/
++/*static*/ float
++Desktop::_AutomaticUIScale(Screen* screen)
++{
++	display_mode mode;
++	screen->GetMode(mode);
++	if (mode.virtual_width == 0)
++		return 1.0f;
++
++	float scale;
++	monitor_info info;
++	if (screen->GetMonitorInfo(info) == B_OK && info.width >= 10.0f
++		&& info.width < 400.0f && info.height >= 5.0f) {
++		// EDID sizes are in cm; anything outside that range is an aspect
++		// ratio, a projector, or garbage
++		float dpi = mode.virtual_width / (info.width / 2.54f);
++		scale = roundf(dpi / 110.0f * 4.0f) / 4.0f;
++		syslog(LOG_INFO, "app_server: %ux%u on a %.0fx%.0f cm display, "
++			"%.0f dpi: UI scale %.2f\n", mode.virtual_width,
++			mode.virtual_height, info.width, info.height, dpi, scale);
++	} else {
++		if (mode.virtual_width >= 3840 && mode.virtual_height >= 2160)
++			scale = 2.0f;
++		else if (mode.virtual_width > 1920 && mode.virtual_height > 1080)
++			scale = 1.5f;
++		else
++			scale = 1.0f;
++		syslog(LOG_INFO, "app_server: %ux%u, display size unknown: "
++			"UI scale %.2f\n", mode.virtual_width, mode.virtual_height, scale);
++	}
++
++	return std::max(1.0f, std::min(scale, 3.0f));
++}
++
++
+ status_t
+ Desktop::Init()
+ {
+@@ -546,15 +592,8 @@
+ 		float fontSize = fSettings->DefaultPlainFont().Size();
+ 		gScreenManager->Lock();
+ 		Screen* screen = gScreenManager->ScreenAt(0);
+-		if (screen != NULL) {
+-			display_mode mode;
+-			screen->GetMode(mode);
+-
+-			if (mode.virtual_width > 3840 && mode.virtual_height > 2160)
+-				fontSize *= 2.0f;
+-			else if (mode.virtual_width > 1920 && mode.virtual_height > 1080)
+-				fontSize *= 1.5f;
+-		}
++		if (screen != NULL)
++			fontSize *= _AutomaticUIScale(screen);
+ 		gScreenManager->Unlock();
+ 
+ 		// modify settings without saving them
+diff -ru a/src/servers/app/Desktop.h b/src/servers/app/Desktop.h
+--- a/src/servers/app/Desktop.h	2026-10-09 23:08:39
++++ b/src/servers/app/Desktop.h	2026-10-09 23:09:10
+@@ -276,6 +276,7 @@
+ 
+ 			void				_FlushPendingColors();
+ 
++	static	float				_AutomaticUIScale(Screen* screen);
+ 			void				_LaunchInputServer();
+ 			void				_GetLooperName(char* name, size_t size);
+ 			void				_PrepareQuit();

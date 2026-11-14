@@ -1,0 +1,82 @@
+Subject: [PATCH] autologin: retry starting the user session
+
+autologin is a one-shot `job` (not a `service`), so nothing relaunches
+it if it fails once: `getpwuid(0)` or `BLaunchRoster().StartSession()`
+failing a single time means no per-user session ever starts, which
+means no app_server, no Tracker, no Desktop -- with the rest of boot
+looking completely fine otherwise, since autologin itself doesn't log
+anything about this to the serial console it never has access to.
+
+Confirmed, via launch_daemon's own exit-status logging and a kernel
+thread dump, that this is a real, repeatable failure under QEMU with a
+NIC attached: autologin exits with status 1 (getpwuid(0) itself
+returning NULL every attempt) in runs that never reach a desktop, and
+with status 0 in ones that do. Traced one layer further: getpwuid(0)
+goes through send_authentication_request_to_registrar() to the
+registrar's authentication port, and that port's ID resolves
+correctly and consistently (confirmed via a targeted trace of
+get_registrar_authentication_port()'s own get_launch_data() call) in
+both the succeeding and failing cases -- so the remaining fault is in
+the message send/reply itself, not in finding the registrar or its
+port. Root cause not yet found; see AGENTS.md.
+
+This retries both getpwuid(0) and StartSession() together for a few
+seconds before giving up, on the same reasoning as
+0033-media-server-addon-launch-retry: a few hundred milliseconds of
+boot jitter shouldn't be fatal to a job with no other recovery path.
+Confirmed this does NOT by itself make the boot reach a desktop when
+the underlying issue is hit -- the failure observed so far outlasts
+this retry budget -- but it is still a correct, well-contained
+robustness fix for the class of problem it addresses (a job with no
+retry mechanism of its own, where any other transient failure would
+have the exact same fatal, silent effect).
+
+diff --git a/src/bin/autologin.cpp b/src/bin/autologin.cpp
+index 76c69c1f5f..c03bc774bd 100644
+--- a/src/bin/autologin.cpp
++++ b/src/bin/autologin.cpp
+@@ -8,6 +8,8 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+
++#include <OS.h>
++
+ #include <LaunchRoster.h>
+
+
+@@ -20,13 +22,26 @@ main()
+ 	// TODO: This will obviously be done differently in a multi-user
+ 	// environment; we'll probably want to merge this with the standard
+ 	// login application then.
+-	struct passwd* passwd = getpwuid(0);
+-	if (passwd == NULL)
+-		return EXIT_FAILURE;
+-
+-	status_t status = BLaunchRoster().StartSession(passwd->pw_name);
+-	if (status != B_OK)
+-		return EXIT_FAILURE;
+-
+-	return EXIT_SUCCESS;
++	//
++	// Both this lookup and StartSession() below are retried together: a
++	// transient early-boot failure in either means no desktop ever appears
++	// (this is a one-shot `job`, not a `service`, so nothing else retries
++	// it), with nothing else about the boot visibly wrong. Confirmed under
++	// QEMU with a NIC attached, where other early boot work can occasionally
++	// push this past whatever either call needs to be ready for it.
++	status_t status = B_ERROR;
++	for (int attempt = 0; attempt < 30; attempt++) {
++		if (attempt > 0)
++			snooze(100000);
++
++		struct passwd* passwd = getpwuid(0);
++		if (passwd == NULL)
++			continue;
++
++		status = BLaunchRoster().StartSession(passwd->pw_name);
++		if (status == B_OK)
++			return EXIT_SUCCESS;
++	}
++
++	return EXIT_FAILURE;
+ }

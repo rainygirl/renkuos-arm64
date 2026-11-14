@@ -1,0 +1,144 @@
+Subject: [PATCH] Tracker: keep desktop icon locations on the grid when the UI scale changes
+
+Desktop icon locations are saved in pixels. When the UI scale changes - a
+larger default font on a HiDPI display, or the user changing the font size
+- the icons grow but the saved points do not, so icons and their labels
+pile on top of each other ("homeTrash").
+
+Record the scale the locations were saved under as an attribute of the
+desktop directory (_trk/pinfo_scale, float). When it differs from the
+current one, scale the saved points by the ratio as poses are created and
+mark them to be saved again. The icon grid and its offset both grow with
+the icon size, so a scaled point lands on the same grid cell. Locations
+saved before the attribute existed count as scale 1.
+
+Ported from renkuos-apps/renku-retina (patch 0002), the same project as
+0037-app-server-dpi-ui-scale -- see that patch for why this is baked
+into the image rather than left to a later pkgman install. Applies
+cleanly as-is to this port's pinned commit.
+
+diff -ru a/src/kits/tracker/PoseView.cpp b/src/kits/tracker/PoseView.cpp
+--- a/src/kits/tracker/PoseView.cpp	2026-10-09 23:08:39
++++ b/src/kits/tracker/PoseView.cpp	2026-10-09 23:14:37
+@@ -113,6 +113,9 @@
+ 
+ const int32 kRoomForLine = 2;
+ 
++// the UI scale desktop icon locations were saved under (float)
++static const char* kAttrLocationScale = "_trk/pinfo_scale";
++
+ const int32 kMenuTrackMargin = 20;
+ 
+ const float kSlowScrollBucket = 30;
+@@ -257,6 +260,7 @@
+ 	fTextWidgetToCheck(NULL),
+ 	fActiveTextWidget(NULL),
+ 	fCachedIconSizeFrom(0),
++	fSavedLocationRatio(-1.0f),
+ 	fStateNeedsSaving(false),
+ 	fSavePoseLocations(true),
+ 	fMultipleSelection(true),
+@@ -882,9 +886,67 @@
+ 				// TODO: fix up this mess
+ 		}
+ 	}
++
++	if (isDesktop) {
++		// remember the UI scale the locations were saved under
++		BNode node(targetModel->EntryRef());
++		float scale = CurrentLocationScale();
++		if (node.InitCheck() == B_OK) {
++			node.WriteAttr(kAttrLocationScale, B_FLOAT_TYPE, 0, &scale,
++				sizeof(scale));
++		}
++		fSavedLocationRatio = 1.0f;
++	}
+ }
+ 
+ 
++/*!	The factor the icons are drawn at: the composed icon size over the one
++	the view state asks for, which follows the system font size.
++*/
++float
++BPoseView::CurrentLocationScale() const
++{
++	const uint32 unscaled = UnscaledIconSizeInt();
++	if (unscaled == 0)
++		return 1.0f;
++	return (float)IconSizeInt() / unscaled;
++}
++
++
++/*!	Desktop icon locations are pixels, saved under whatever UI scale was in
++	use then. When the scale has changed since - a larger default font on a
++	HiDPI display, say - the saved points crowd the icons together, labels
++	overlapping. This returns the factor that maps them to the current scale;
++	locations saved before the scale was recorded count as scale 1.
++*/
++float
++BPoseView::SavedLocationRatio()
++{
++	if (fSavedLocationRatio >= 0.0f)
++		return fSavedLocationRatio;
++
++	fSavedLocationRatio = 1.0f;
++	if (!IsDesktopView() || IsFilePanel() || TargetModel() == NULL
++		|| ViewMode() == kListMode)
++		return fSavedLocationRatio;
++
++	float saved = 1.0f;
++	BNode node(TargetModel()->EntryRef());
++	if (node.InitCheck() == B_OK) {
++		float value;
++		if (node.ReadAttr(kAttrLocationScale, B_FLOAT_TYPE, 0, &value,
++				sizeof(value)) == sizeof(value) && value >= 1.0f
++			&& value <= 8.0f)
++			saved = value;
++	}
++
++	const float ratio = CurrentLocationScale() / saved;
++	if (fabsf(ratio - 1.0f) > 0.01f)
++		fSavedLocationRatio = ratio;
++	return fSavedLocationRatio;
++}
++
++
+ void
+ BPoseView::StartWatching()
+ {
+@@ -2032,8 +2094,18 @@
+ 
+ 		// set location from poseinfo if saved loc was for this dir
+ 		if (poseInfo->fInitedDirectory != -1LL) {
++			const float ratio = SavedLocationRatio();
++			if (ratio != 1.0f) {
++				// saved under another UI scale: the grid and its offset both
++				// grow with the icon size, so scaling the point keeps it on
++				// the grid
++				poseInfo->fLocation.x = roundf(poseInfo->fLocation.x * ratio);
++				poseInfo->fLocation.y = roundf(poseInfo->fLocation.y * ratio);
++			}
+ 			PinPointToValidRange(poseInfo->fLocation);
+ 			pose->SetLocation(poseInfo->fLocation, this);
++			if (ratio != 1.0f)
++				pose->SetSaveLocation();
+ 			AddToVSList(pose);
+ 		}
+ 
+diff -ru a/src/kits/tracker/PoseView.h b/src/kits/tracker/PoseView.h
+--- a/src/kits/tracker/PoseView.h	2026-10-09 23:08:39
++++ b/src/kits/tracker/PoseView.h	2026-10-09 23:10:10
+@@ -801,8 +801,13 @@
+ 	BTextWidget* fActiveTextWidget;
+ 
+ private:
++	float CurrentLocationScale() const;
++	float SavedLocationRatio();
++
+ 	mutable uint32 fCachedIconSizeFrom;
+ 	mutable BSize fCachedIconSize;
++	float fSavedLocationRatio;
++		// < 0 until read; see SavedLocationRatio()
+ 
+ 	typedef BView _inherited;
+ 

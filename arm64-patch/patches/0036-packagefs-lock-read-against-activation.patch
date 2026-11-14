@@ -1,0 +1,116 @@
+Subject: [PATCH] packagefs: lock directory around read() against activation
+
+packagefs_read_stat(), packagefs_read_symlink(), and packagefs_access()
+all take a DirectoryReadLocker via lock_directory_for_node() before
+touching a node. packagefs_read() -- the buffered read entry point,
+used by fopen()/fgets() and everything else that goes through the
+regular read() syscall -- took no lock at all.
+
+Package activation (UnpackingLeafNode::AddPackageNode/RemovePackageNode,
+called under the parent directory's write lock by
+Volume::_AddPackageContentRootNode) can swap which PackageNode backs a
+given Node while a read is in flight. NodeReinitVFS() inits the
+incoming PackageNode's VFS state (PackageFile::VFSInit(), which creates
+a file_cache) before uninitializing the outgoing one (VFSUninit(),
+which deletes it) -- so there is a window where either no fully
+initialized file_cache exists for that node, or two do. An unlocked
+read() landing in that window can fault in pages against a file_cache
+that is mid-teardown or mid-init, and come back with pages of the
+wrong content, while a concurrent locked stat() on the same node
+reports whichever package version resolved after the swap -- so the
+size and the data visibly disagree.
+
+packagefs_io() -- the io() entry point for direct/vectored I/O -- does
+*not* get the same lock, even though it has the identical hazard in
+principle. That is deliberate, not an oversight: packagefs_io() is
+also reached reentrantly, on the same thread, from inside
+packagefs_read() itself, via node->Read() -> PackageFile::Read() ->
+file_cache_read() -> (on a cache miss) -> vfs_read_pages() ->
+vfs_vnode_io(), which dispatches straight back to packagefs_io() on
+the same vnode. Haiku's rw_lock (headers/private/kernel/lock.h) has no
+per-thread reentrancy tracking -- it's a plain atomic reader count --
+so a second read-lock attempt on the same directory, by a thread that
+already holds one, can queue behind a writer that is itself waiting on
+that lock, which can't proceed until the outer (same-thread) read
+reference is released: a self-deadlock. This was caught by actually
+building and boot-testing an earlier version of this fix that *did*
+lock packagefs_io() too: it reproduced the exact original corruption
+(fstat() reporting 127 bytes, content entirely zero, where the file is
+really 43 bytes of "baron:...") in 4 of 6 consecutive test boots,
+because the added lock was itself colliding with the reentrant call.
+packagefs_read() holding the lock for the whole duration of its call
+into node->Read() already covers this reentrant path; the only callers
+that reach packagefs_io() directly, not through packagefs_read() (e.g.
+mmap-backed I/O), are exactly as unprotected against a concurrent
+package-node swap as they were before this file had any such locking
+at all -- not a regression this change introduces.
+
+Confirmed fixed under QEMU with a network device attached (the extra
+driver/thread work at boot shifts scheduling enough to make the
+activation race land inside a read far more often): the registrar's
+own early read of /etc/passwd would intermittently come back entirely
+zero-filled. autologin, media_server, and sshd failing their own
+early-boot reads the same way is consistent with the same root cause:
+all three do early reads of files packagefs serves, in the same boot
+window package_daemon logs repeated package-activation churn.
+
+This is upstream Haiku kernel code
+(src/add-ons/kernel/file_systems/packagefs/kernel_interface.cpp), not
+anything this port's own patches touch -- it can affect any Haiku boot
+(any architecture) with enough concurrent early reads racing package
+activation. Worth upstreaming once confirmed fixed here.
+
+diff --git a/src/add-ons/kernel/file_systems/packagefs/kernel_interface.cpp b/src/add-ons/kernel/file_systems/packagefs/kernel_interface.cpp
+index 255f817b26..b8ab3442ef 100644
+--- a/src/add-ons/kernel/file_systems/packagefs/kernel_interface.cpp
++++ b/src/add-ons/kernel/file_systems/packagefs/kernel_interface.cpp
+@@ -295,6 +295,24 @@ packagefs_io(fs_volume* fsVolume, fs_vnode* fsNode, void* cookie,
+ 	if (io_request_is_write(request))
+ 		RETURN_ERROR(B_READ_ONLY_DEVICE);
+ 
++	// Deliberately not taking the directory lock here (unlike
++	// packagefs_read_stat()/read_symlink()/access(), and unlike
++	// packagefs_read() below): this entry point is also reached
++	// reentrantly, on the same thread, from packagefs_read() itself, via
++	// node->Read() -> PackageFile::Read() -> file_cache_read() -> (cache
++	// miss) -> vfs_read_pages() -> vfs_vnode_io() dispatching straight
++	// back to this function on the same vnode. Haiku's rw_lock has no
++	// per-thread reentrancy tracking (plain atomic reader count), so a
++	// second read-lock attempt on the same directory, on the same thread
++	// that already holds one, can queue behind a writer that is waiting
++	// on that same lock -- a self-deadlock, since that writer in turn
++	// can't proceed until the outer (same-thread) read reference is
++	// dropped. packagefs_read() already holds the directory lock for the
++	// whole duration of its call into node->Read(), which covers this
++	// reentrant path too; the only callers that reach packagefs_io() NOT
++	// through packagefs_read() (e.g. mmap-backed I/O) are exactly as
++	// unprotected against a concurrent package-node swap as they were
++	// before this file had any such locking at all -- not a regression.
+ 	status_t error = node->Read(request);
+ 	notify_io_request(request, error);
+ 	return error;
+@@ -483,6 +501,24 @@ packagefs_read(fs_volume* fsVolume, fs_vnode* fsNode, void* _cookie,
+ 	if ((cookie->openMode & O_RWMASK) != O_RDONLY)
+ 		return EBADF;
+ 
++	// Held for the whole call below, including whatever it recurses into
++	// (see packagefs_io()'s comment on why *that* function must not also
++	// take this lock): without it, a concurrent package activation
++	// swapping this node's active PackageNode (Directory's write-locked
++	// AddPackageNode()/RemovePackageNode()) can be resolved mid-read, and
++	// node->Read() can fault in pages against a PackageFile whose backing
++	// file_cache is either not yet fully initialized (the incoming
++	// version) or already being torn down (the outgoing one) -- both of
++	// which can hand back zeroed pages instead of real content. Confirmed
++	// under QEMU with a NIC attached, reading registrar's own passwd DB
++	// file: a stat() reporting 127 bytes followed immediately by a
++	// read() of the same fd returning that many bytes, all zero, where
++	// the file is actually a static 43-byte entry once activation
++	// settles.
++	DirectoryReadLocker dirLocker;
++	if (!lock_directory_for_node(volume, node, dirLocker))
++		return B_NO_INIT;
++
+ 	return node->Read(offset, buffer, bufferSize);
+ }
+ 

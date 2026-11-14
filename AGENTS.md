@@ -208,43 +208,149 @@ Settled by hitting the failure, not preference:
   rebuilding with the patch and reaching FirstBootPrompt repeatedly where
   it previously hung every time.
 
-- **A network device can deadlock launch_daemon's registrar bootstrap --
-  separate bug, still open.** With a real NIC attached (confirmed with
-  both `virtio-net-pci` and `e1000`; confirmed under both hvf and `--tcg`,
-  so not an accelerator-timing issue) and DHCP completing successfully in
-  under a millisecond (confirmed with QEMU's own `-object filter-dump`
-  packet capture -- this is not a DHCP problem), boot can still hang
-  forever right after `register_domain(4, link)`, idle (not spinning --
-  confirmed via QMP PC sampling and `info registers`, and via
-  `get_system_info()`: sems/ports/threads/teams/free memory all stay
-  completely flat for minutes, so it is not a resource leak either).
-  Traced with a kernel thread dump plus targeted `debug_printf` tracing
-  (both temporary, not committed) to an exact, reproducible point:
-  `LaunchDaemon`'s single job-queue worker thread is permanently blocked
-  inside `Job::_Launch()`'s call to `BRoster::Private().Launch()` --
-  specifically while launching the `registrar` job itself, which
-  `launch_daemon`'s own bookkeeping shows stuck at `launching=1,
-  running=0` (never reaches `running`). Every later service launch goes
-  through the same registrar IPC round-trip, so once this one call never
-  returns, nothing else `launch_daemon` is responsible for can start
-  either -- which is why `media_server` and (independently, with
-  `media_server` disabled instead) `sshd` were the ones seen crash-looping
-  before `0032-launchdaemon-restart-throttle` made that loop stop
-  consuming all the CPU: both are plain bystanders repeatedly failing
-  `_CanLaunchJob()`'s `IsRunning()`/`IsLaunching()` checks on a daemon that
-  can no longer process anything, not services with their own bugs.
-  Reaching this point took a full session; what's still open is *why*
-  `registrar`'s own bootstrap through that exact IPC call blocks
-  specifically when a NIC is present -- confirmed not resource exhaustion,
-  not any one service's fault, not the accelerator, and (unlike the
-  `0031` bug) not something `info registers` PC sampling alone resolves,
-  since the blocked thread sits in a semaphore wait, not a spin. Next
-  step for whoever picks this up: trace `BRoster::_LaunchApp()` ->
-  `_AddApplication()` (`src/kits/app/Roster.cpp`) and whatever on the
-  `registrar` team's side is supposed to answer that message but
-  apparently never gets there, plus check whether `fNoRegistrar`'s handling
-  of the registrar's own self-launch is actually exercised the same way
-  with a NIC attached as without one.
+- **A network device could keep the desktop from ever appearing -- fixed
+  (`0036-packagefs-lock-read-against-activation`).** With a real NIC
+  attached (confirmed with both `virtio-net-pci` and `e1000`; confirmed
+  under both hvf and `--tcg`, so not an accelerator-timing issue) and
+  DHCP completing successfully in under a millisecond (confirmed with
+  QEMU's own `-object filter-dump` packet capture -- this was never a
+  DHCP problem), boot could finish at the kernel and `launch_daemon`
+  level -- `net_server`, `mount_server`, `package_daemon`,
+  `syslog_daemon`, and the registrar (whose team's main thread is
+  actually named `roster`, not `registrar` -- easy to miss when grepping
+  a thread dump) all start and stay up fine -- and yet no desktop ever
+  appeared, with the system otherwise sitting idle.
+
+  Traced (with targeted, temporary `debug_printf` tracing through
+  `launch_daemon`, `autologin`, libroot's `user_group_common.cpp`, and
+  finally the registrar's `AuthenticationManager::_InitPasswdDB()`
+  itself) to a genuine packagefs kernel bug, not anything in
+  `launch_daemon`, `autologin`, or the registrar's own logic:
+  `packagefs_read()` (`src/add-ons/kernel/file_systems/packagefs/kernel_interface.cpp`)
+  -- the entry point behind every ordinary `read()` syscall, including
+  the registrar's own early `fopen("/etc/passwd")` -- took no lock at
+  all, while `packagefs_read_stat()`, `packagefs_read_symlink()`, and
+  `packagefs_access()` all take a `DirectoryReadLocker` on the node's
+  parent directory first. Package activation
+  (`UnpackingLeafNode::AddPackageNode()`/`RemovePackageNode()`, called
+  under that same directory's *write* lock by
+  `Volume::_AddPackageContentRootNode()`) can swap which `PackageNode`
+  backs a node while an unlocked read is in flight: `NodeReinitVFS()`
+  inits the incoming `PackageNode`'s `file_cache` before uninitializing
+  the outgoing one, so there's a window where a concurrent read can
+  fault in pages against a `file_cache` that's mid-teardown or
+  mid-init and get zeroed pages back, while a concurrent *locked*
+  `stat()` on the same node reports whichever package version resolved
+  after the swap -- so the size and the data visibly disagree. Confirmed
+  directly: `fstat()` on `/etc/passwd` reporting 127 bytes with the
+  actual read coming back entirely zero-filled, where the file is a
+  real, static 43-byte entry ("baron:x:0:0:Root...") once activation
+  settles. `autologin`, `media_server`, and `sshd` each failing their
+  own early-boot reads the same way (each returning `EXIT_FAILURE` from
+  an ordinary, non-crashing error path, confirmed via `launch_daemon`'s
+  own `wait_for_thread()` exit-status logging) is the same root cause:
+  all three do early reads of files packagefs serves, in the same boot
+  window `package_daemon` logs repeated package-activation churn. It
+  only needed a NIC attached to show up reliably because the extra
+  driver/thread work at boot shifts scheduling enough to make the
+  activation race land inside a read far more often -- not because
+  networking itself was ever involved.
+
+  First attempt at the fix added the same `DirectoryReadLocker` to
+  `packagefs_io()` too (the `io()` entry point, for direct/vectored
+  I/O), reasoning it had the identical hazard in principle. Built and
+  boot-tested, this made things *worse*: 6 of 6 identical test boots
+  reproduced the exact corruption. Root cause of that regression:
+  `packagefs_io()` is also reached *reentrantly*, on the same thread,
+  from inside `packagefs_read()` itself, via `node->Read()` ->
+  `PackageFile::Read()` -> `file_cache_read()` -> (on a cache miss,
+  guaranteed on a node whose `file_cache` was just created) ->
+  `vfs_read_pages()` -> `vfs_vnode_io()`, which dispatches straight
+  back to `packagefs_io()` on the same vnode. Haiku's `rw_lock`
+  (`headers/private/kernel/lock.h`) has no per-thread reentrancy
+  tracking -- a second read-lock attempt on the same directory, by a
+  thread that already holds one, can queue behind a writer that's
+  itself waiting on that lock, which can't proceed until the outer
+  (same-thread) read reference is released: a self-deadlock. The fix
+  that actually works locks only `packagefs_read()`, which already
+  holds the lock for the whole duration of its call into `node->Read()`
+  -- covering the reentrant path into `packagefs_io()` too -- and
+  leaves `packagefs_io()` itself unlocked (callers that reach it
+  directly, not through `packagefs_read()`, such as mmap-backed I/O,
+  are exactly as unprotected against this race as they always were;
+  not a regression this patch introduces). Confirmed fixed: the exact
+  boot configuration that reproduced the hang in 6 of 6 trials reached
+  a working `sshd` in 10 of 10 trials after the fix (6 with diagnostic
+  tracing still in place, 4 on the final clean build).
+
+  This is upstream Haiku kernel code, not anything this port's own
+  patches touch, and can affect any Haiku boot (any architecture) with
+  enough concurrent early reads racing package activation -- worth
+  upstreaming. `0033-media-server-addon-launch-retry` and
+  `0034-autologin-startsession-retry`'s bounded retries remain in place
+  as harmless defense-in-depth (same reasoning as `0032`), though with
+  `0036` they shouldn't actually be needed anymore for this failure
+  mode.
+
+- **app_server could segfault in `memcpy` painting the very first desktop
+  background -- two distinct causes, both fixed.** Signature (identical
+  both times): `debug_server: Thread N entered the debugger: Segment
+  violation`, PC inside `memcpy`, called from
+  `HWInterface::_CopyBackToFront` -> `CopyBackToFront` ->
+  `InvalidateRegion` -> `DrawingEngine::FillRegion` ->
+  `Desktop::_SetBackground` -> `Desktop::Init` -> `AppServer::_CreateDesktop`.
+
+  **Cause 1, `0040-virtio-gpu-follow-host-size`:** `virtio_gpu_init_device()`
+  (`src/add-ons/kernel/drivers/graphics/virtio/virtio_gpu.cpp`) allocated
+  one fixed-size framebuffer area, 3840x2160 (4K), "so we can fit every
+  mode" -- but `bytes_per_row`/the scanout resource are sized from the
+  *actual* requested display mode, and `virtio_gpu_set_display_mode()`
+  reuses the same fixed area for every later mode change rather than
+  resizing it. Any mode over 4K in either dimension overflowed it.
+  Confirmed crashing deterministically (reproduced on every single boot,
+  not intermittent) at 6720x2836 -- a real `system_profiler`-reported
+  resolution on an Apple Silicon Mac Mini, not a synthetic value. Fixed
+  by `0040` (ported from `renkuos-apps/renku-retina`, whose own fix for
+  this same hazard allocates 5120x2880 -- not enough on its own, since
+  this port's own QEMU launcher offers the guest the host's actual
+  resolution and 6720x2836 exceeds it; this port's own addition on top
+  tries 7680x4320 first, falling back to 5120x2880 and 3840x2160).
+  Confirmed fixed by rebuilding and boot-testing at the exact same
+  6720x2836 resolution that crashed every time before.
+
+  **Cause 2, the qemu-notch dylib's `-S`/QMP `cont` resume (`tools/qemu-notch/qemu-notch.m`):**
+  this did *not* explain the second reproduction, on the real target
+  MacBook Air at its actual native resolution, 2560x1664 -- well under
+  the old 4K cap, so cause 1's fix alone did not help here. Isolated by
+  a set of controlled A/B boots at the identical resolution: `--window`
+  (no full screen, dylib loaded but its full-screen/`-S` logic never
+  triggers) booted clean; `--fullscreen` with the dylib disabled
+  entirely booted clean; `--fullscreen` with the dylib's EDID/Retina
+  override active but a test-only skip of just the `-S` hold booted
+  clean; only the real, unmodified `--fullscreen` path (dylib active,
+  `-S` hold, `cont` sent) crashed -- reproducibly, on the real machine,
+  twice. Root cause: `EnterOverlay()` resizes the view/window and calls
+  `Refresh()`, which only *asks* QEMU's own Cocoa UI thread to apply the
+  new size and re-negotiate virtio-gpu's EDID-reported geometry -- it
+  does not wait for that to finish -- before `StartGuest()` sends `cont`
+  over QMP from a background queue. A guest that starts executing in
+  that gap can reach its own EDID query, and then `Desktop::Init()`'s
+  first paint, before the resize has actually landed, racing a
+  framebuffer configuration that's still being changed out from under
+  it. Fixed with a 300 ms `usleep` before `StartGuest()` opens the QMP
+  socket -- a plain fixed delay rather than plumbing a real completion
+  callback through QEMU's own (unhooked) resize path, cheap against the
+  many seconds a boot already takes or the 30 s fallback this mechanism
+  already tolerates if full screen is never reached at all. Confirmed
+  fixed: 5 of 5 trials at the real crash resolution through the exact,
+  unmodified `--fullscreen` path, plus the real `MacRenkuOS.app` itself
+  relaunched end to end on the real target Mac.
+
+  Both are upstream/this-port's-own-tooling issues respectively (the
+  virtio_gpu one is upstream Haiku kernel code and worth upstreaming;
+  the qemu-notch one is this port's own macOS-side tooling, not Haiku
+  code at all) -- neither is related to the packagefs fix above, despite
+  surfacing in the same investigation.
 
 ## Known limitations
 
@@ -286,5 +392,21 @@ reinvestigating here.)
   (checked, not assumed).
 - **R\* apps**: install via `pkgman` from the hosted repository,
   https://pkgman.rainygirl.com/arm64, after boot -- not baked into the ISO,
-  with one exception: R AppMarket itself ships on the image (0020), so a
-  fresh guest always has a GUI to install the rest with.
+  with two exceptions: R AppMarket itself ships on the image (0020), so a
+  fresh guest always has a GUI to install the rest with, and R Retina's
+  underlying app_server/Tracker/Screen/virtio_gpu patches (0037-0040) are
+  folded directly into the image rather than left to R Retina's own
+  `rretina` package, so the correct HiDPI scale is already picked during
+  the very first live boot -- before Installer ever opens -- not only
+  after a later package install.
+- **Retina/HiDPI detection** (0037-0040): confirmed on the real target Mac
+  (a 13" MacBook Air) through the actual `MacRenkuOS.app` launch path --
+  `virtio_gpu_get_edid_info()` read the panel as 29x18 cm at 2560x1664
+  (≈224 dpi), which `Desktop::_AutomaticUIScale()` turns into 2x, the
+  right scale for that panel -- with no crash and a full boot to a
+  working `sshd`, on the same real launch path (notch dylib, full
+  screen, `-S`/QMP `cont`) that crashed before `0036`/the qemu-notch
+  delay fix above. Also confirmed not regressing the virtio_gpu
+  framebuffer-overflow fix: the same real `system_profiler`-reported
+  6720x2836 that crashed app_server deterministically before boots
+  clean with `0040`'s 8K-first allocation cascade.

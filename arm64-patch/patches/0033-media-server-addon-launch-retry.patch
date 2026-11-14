@@ -1,0 +1,95 @@
+Subject: [PATCH] media_server: retry launching media_addon_server
+
+_LaunchAddOnServer() tried be_roster->Launch() by MIME signature once,
+fell back to a direct path launch once, and called exit(1) on the
+whole media_server process if both failed -- confirmed as one of three
+independent early-boot jobs (media_server, sshd, and the autologin job
+that starts the user session in the first place -- see AGENTS.md) that
+can lose a race against something still being readied elsewhere in the
+system and exit immediately instead of hanging, with no further retry
+since media_server is a `service` but exits fast enough each time that
+nothing about it looks like a crash. Confirmed via launch_daemon's own
+exit-status logging: media_server always exits with status 1 in a run
+that never reaches a desktop, status 0 in one that does.
+
+Wraps the existing signature-then-path launch attempt in a bounded
+retry loop (up to 20 attempts, 100ms apart) instead of giving up
+immediately. This does not by itself fully resolve the underlying race
+(see AGENTS.md -- the same symptom can still outlast this retry
+budget), but is a real, well-contained robustness fix in its own
+right: media_server already tolerates this failure being transient
+once (hence the signature-then-path fallback it already had), and
+giving it more than one chance to clear a few hundred milliseconds of
+boot jitter is strictly safer than exiting on the first failure.
+
+diff --git a/src/servers/media/media_server.cpp b/src/servers/media/media_server.cpp
+index 561eeec68a..6377f46940 100644
+--- a/src/servers/media/media_server.cpp
++++ b/src/servers/media/media_server.cpp
+@@ -190,30 +190,42 @@ ServerApp::ArgvReceived(int32 argc, char **argv)
+ void
+ ServerApp::_LaunchAddOnServer()
+ {
+-	// Try to launch media_addon_server by mime signature.
+-	// If it fails (for example on the Live CD, where the executable
+-	// hasn't yet been mimesetted), try from this application's
+-	// directory
+-	status_t err = be_roster->Launch(B_MEDIA_ADDON_SERVER_SIGNATURE);
+-	if (err == B_OK)
+-		return;
+-
+-	app_info info;
+-	BEntry entry;
+-	BDirectory dir;
+-	entry_ref ref;
+-
+-	err = GetAppInfo(&info);
+-	err |= entry.SetTo(&info.ref);
+-	err |= entry.GetParent(&entry);
+-	err |= dir.SetTo(&entry);
+-	err |= entry.SetTo(&dir, "media_addon_server");
+-	err |= entry.GetRef(&ref);
+-
+-	if (err == B_OK)
+-		be_roster->Launch(&ref);
+-	if (err == B_OK)
+-		return;
++	// Try to launch media_addon_server by mime signature. If it fails (for
++	// example on the Live CD, where the executable hasn't yet been
++	// mimesetted, or early at boot, where the registrar's MIME database and
++	// app list may not be fully populated yet), try from this application's
++	// directory. Retry both for a few seconds before giving up: this is a
++	// one-time startup race, not a hard dependency failure, and giving up on
++	// the first attempt turned media_server into the most eager thing to
++	// fail during a boot that's merely running a little behind (confirmed
++	// under QEMU with a NIC attached, where other early boot steps can push
++	// this race just far enough to lose).
++	status_t err = B_ERROR;
++	for (int attempt = 0; attempt < 20; attempt++) {
++		if (attempt > 0)
++			snooze(100000);
++
++		err = be_roster->Launch(B_MEDIA_ADDON_SERVER_SIGNATURE);
++		if (err == B_OK)
++			return;
++
++		app_info info;
++		BEntry entry;
++		BDirectory dir;
++		entry_ref ref;
++
++		err = GetAppInfo(&info);
++		err |= entry.SetTo(&info.ref);
++		err |= entry.GetParent(&entry);
++		err |= dir.SetTo(&entry);
++		err |= entry.SetTo(&dir, "media_addon_server");
++		err |= entry.GetRef(&ref);
++
++		if (err == B_OK)
++			err = be_roster->Launch(&ref);
++		if (err == B_OK)
++			return;
++	}
+
+ 	BAlert* alert = new BAlert("media_server", "Launching media_addon_server "
+ 		"failed.\n\nmedia_server will terminate", "OK");

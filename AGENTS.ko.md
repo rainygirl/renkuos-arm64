@@ -236,39 +236,133 @@ such file or directory` 같은, 진짜 원인과는 전혀 상관없어 보이�
   멈췄던 지점을 지나 FirstBootPrompt까지 반복해서 도달하는 걸 확인해
   고쳐졌음을 검증했습니다.
 
-- **네트워크 장치가 launch_daemon의 registrar 부트스트랩을 데드락시킬
-  수 있음 -- 별개의, 아직 미해결인 버그.** 실제 NIC을 붙이면(virtio-net-pci,
-  e1000 둘 다 확인; hvf와 `--tcg` 둘 다에서 확인되어 가속기 타이밍
-  문제는 아님) DHCP는 1밀리초 안에 완벽히 성공하는데도(QEMU 자체의
-  `-object filter-dump` 패킷 캡처로 확인 -- DHCP 문제가 아님) `register_domain(4,
-  link)` 직후에서 부팅이 영원히 멈출 수 있습니다. 멈춘 상태는 유휴
-  상태입니다(스핀이 아님 -- QMP PC 샘플링과 `info registers`로 확인,
-  `get_system_info()`로도 세마포어/포트/스레드/팀/가용 메모리가 몇 분간
-  완전히 평평하게 유지되는 걸 확인해 리소스 누수도 아님). 커널 스레드
-  덤프와 임시(커밋하지 않은) `debug_printf` 추적으로 정확한 지점까지
-  추적했습니다: `LaunchDaemon`의 단일 잡 큐 워커 스레드가
-  `Job::_Launch()`의 `BRoster::Private().Launch()` 호출 안에서 영구히
-  블록되어 있는데, 하필 `registrar` 잡 자신을 실행하려는 중이고,
-  `launch_daemon` 자체 기록에는 `launching=1, running=0`으로 멈춰
-  있습니다(`running`에 끝내 도달 못함). 이후의 모든 서비스 실행이 같은
-  registrar IPC 왕복을 거치기 때문에, 이 호출 하나가 영원히 리턴을 안
-  하면 `launch_daemon`이 책임지는 다른 어떤 것도 뜰 수 없습니다 --
-  `0032-launchdaemon-restart-throttle`로 이 루프가 CPU를 다 먹어치우는
-  걸 멈추기 전까지 `media_server`와(별도로, `media_server`를 꺼둔
-  채로는) `sshd`가 크래시 루프를 도는 것처럼 보였던 이유가 이것입니다:
-  둘 다 자기 자신의 버그가 있는 게 아니라, 더 이상 아무것도 처리할 수
-  없는 데몬 위에서 `_CanLaunchJob()`의 `IsRunning()`/`IsLaunching()` 체크를
-  반복해서 실패하는 순진한 구경꾼일 뿐입니다. 여기까지 오는 데 세션
-  하나를 통째로 썼습니다; 아직 미해결인 건 *왜* `registrar` 자신의
-  부트스트랩이 바로 그 IPC 호출에서 NIC이 있을 때만 막히는가입니다 --
-  리소스 고갈도, 특정 서비스의 버그도, 가속기 문제도 아님을 확인했고,
-  (`0031` 버그와 달리) 블록된 스레드가 스핀이 아니라 세마포어 대기
-  상태라서 `info registers`의 PC 샘플링만으로는 더 파고들 수 없습니다.
-  다음에 이어받을 사람을 위한 다음 단계: `BRoster::_LaunchApp()` ->
-  `_AddApplication()`(`src/kits/app/Roster.cpp`)과, 그 메시지에 응답해야
-  할 `registrar` 팀 쪽에서 왜 거기까지 도달을 못 하는지를 추적하고,
-  registrar 자기 자신의 셀프 런치를 처리하는 `fNoRegistrar` 로직이 NIC이
-  있을 때와 없을 때 정말 똑같이 동작하는지도 확인해볼 것.
+- **네트워크 장치가 있으면 데스크탑이 영원히 안 뜨던 문제 -- 수정됨
+  (`0036-packagefs-lock-read-against-activation`).** 실제 NIC을
+  붙이면(virtio-net-pci, e1000 둘 다 확인; hvf와 `--tcg` 둘 다에서 확인되어
+  가속기 타이밍 문제는 아님) DHCP는 1밀리초 안에 완벽히 성공하는데도(QEMU
+  자체의 `-object filter-dump` 패킷 캡처로 확인 -- DHCP 문제가 아니었음),
+  커널과 `launch_daemon` 레벨에서는 부팅이 끝났습니다 -- `net_server`,
+  `mount_server`, `package_daemon`, `syslog_daemon`, registrar(이 팀의
+  메인 스레드 이름은 실제로 `roster`이지 `registrar`가 아닙니다 -- 스레드
+  덤프에서 grep할 때 놓치기 쉬움)가 전부 뜨고 멀쩡히 유지됐지만 -- 그런데도
+  데스크탑이 전혀 뜨지 않고 시스템은 그냥 유휴 상태로 있었습니다.
+
+  `launch_daemon`/`autologin`/libroot의 `user_group_common.cpp`를 거쳐
+  최종적으로 registrar의 `AuthenticationManager::_InitPasswdDB()` 자체까지
+  들어가는 타겟 `debug_printf` 추적(전부 임시)으로 추적한 결과, 진짜
+  원인은 `launch_daemon`도 `autologin`도 registrar 자체의 로직도 아니라
+  packagefs 커널 코드의 진짜 버그였습니다:
+  `packagefs_read()`(`src/add-ons/kernel/file_systems/packagefs/kernel_interface.cpp`)
+  -- 일반 `read()` 시스템콜 전부, registrar 자신의 초기 `fopen("/etc/passwd")`도
+  포함해서 그 뒤에 있는 진입점 -- 는 아무 락도 안 잡는데, `packagefs_read_stat()`,
+  `packagefs_read_symlink()`, `packagefs_access()`는 전부 먼저 노드의 부모
+  디렉토리에 `DirectoryReadLocker`를 잡습니다. 패키지 활성화
+  (`Volume::_AddPackageContentRootNode()`가 바로 그 디렉토리의 *쓰기* 락
+  아래서 호출하는 `UnpackingLeafNode::AddPackageNode()`/`RemovePackageNode()`)는
+  언락된 읽기가 진행 중인 동안에도 어떤 노드를 뒷받침하는 `PackageNode`를
+  바꿔칠 수 있습니다: `NodeReinitVFS()`는 새로 들어오는 `PackageNode`의
+  `file_cache`를 먼저 초기화하고 나가는 쪽을 나중에 해제하므로, 그 사이에
+  동시 읽기가 반쯤 해제 중이거나 반쯤 초기화 중인 `file_cache`에 걸려서
+  0으로 채워진 페이지를 받아올 수 있는 구간이 생깁니다 -- 반면 같은 노드에
+  대한 동시 *락이 걸린* `stat()`은 스왑 이후 resolve된 버전의 크기를
+  보고하므로, 크기와 실제 데이터가 서로 어긋나게 됩니다. 직접 확인:
+  `/etc/passwd`의 `fstat()`이 127바이트를 보고하는데 실제 읽은 내용은 전부
+  0이고, 활성화가 끝난 뒤의 실제 파일은 43바이트의 고정된 내용
+  ("baron:x:0:0:Root...")입니다. `autologin`, `media_server`, `sshd`가 각자
+  자신의 초기 부팅 읽기에서 (크래시 없이, 평범한 에러 경로에서
+  `EXIT_FAILURE`를 반환하며) 똑같이 실패하는 것도 같은 근본 원인입니다:
+  셋 다 packagefs가 서빙하는 파일을 초기에 읽는데, 바로 그 시점에
+  `package_daemon`이 패키지 활성화 작업을 반복해서 로그로 남기고 있습니다.
+  네트워크 장치가 있어야만 안정적으로 재현된 건 네트워킹 자체가 관련된 게
+  아니라, 추가된 드라이버/스레드 작업이 스케줄링을 충분히 흔들어서 이
+  활성화 레이스가 읽기 도중에 걸릴 확률을 크게 높이기 때문이었습니다.
+
+  첫 번째 수정 시도는 같은 `DirectoryReadLocker`를 `packagefs_io()`
+  (direct/vectored I/O용 `io()` 진입점)에도 추가했습니다 -- 원리상 동일한
+  위험이 있다고 판단해서였습니다. 실제로 빌드해서 부팅 테스트를 해 보니
+  오히려 *더 나빠졌습니다*: 동일한 테스트 부팅 6번 중 6번 모두 정확히 같은
+  손상이 재현됐습니다. 이 회귀의 원인: `packagefs_io()`는
+  `packagefs_read()` 자신의 안에서도 같은 스레드로 *재진입* 호출됩니다 --
+  `node->Read()` -> `PackageFile::Read()` -> `file_cache_read()` -> (방금
+  `file_cache`가 생성된 노드라 거의 확실한 캐시 미스) -> `vfs_read_pages()`
+  -> `vfs_vnode_io()`를 거쳐 같은 vnode에 대해 곧바로 `packagefs_io()`로
+  다시 들어옵니다. Haiku의 `rw_lock`(`headers/private/kernel/lock.h`)은
+  스레드별 재진입 추적이 없어서 -- 이미 읽기 락을 하나 들고 있는 스레드가
+  같은 디렉토리에 두 번째 읽기 락을 시도하면, 바로 그 락을 기다리고 있는
+  쓰기 측 뒤에 줄을 서게 되고, 그 쓰기 측은 바깥쪽(같은 스레드)의 읽기
+  참조가 풀리기 전까진 진행할 수 없습니다 -- 자기 자신과의 교착
+  상태입니다. 실제로 작동하는 수정은 `packagefs_read()`에만 락을 걸고
+  (이 함수는 이미 `node->Read()` 호출 전체 동안 락을 들고 있어서,
+  `packagefs_io()`로의 재진입 경로도 함께 보호됩니다) `packagefs_io()`
+  자체는 락을 걸지 않고 둡니다(`packagefs_read()`를 거치지 않고 직접
+  도달하는 호출 경로 -- 예: mmap 기반 I/O -- 는 이 레이스에 대해 원래부터
+  보호받지 못하고 있던 것과 똑같은 상태일 뿐, 이 패치가 새로 만든 회귀는
+  아닙니다). 수정 확인: 수정 전엔 6번 중 6번 모두 멈췄던 바로 그 부팅
+  설정이, 수정 후엔 10번 중 10번 모두(진단 코드가 남아있던 6번 + 최종
+  클린 빌드의 4번) 정상적으로 동작하는 `sshd`까지 도달했습니다.
+
+  이건 이 포트 자신의 패치가 건드리는 영역이 아닌 업스트림 Haiku 커널
+  코드이고, 패키지 활성화와 경쟁할 만큼 초기 읽기가 충분히 동시에 일어나는
+  어떤 아키텍처의 Haiku 부팅에도 영향을 줄 수 있습니다 -- 업스트림에
+  올릴 가치가 있습니다. `0033-media-server-addon-launch-retry`와
+  `0034-autologin-startsession-retry`의 제한된 재시도는 (`0032`와 같은
+  이유로) 무해한 방어막으로 그대로 남겨두지만, `0036`이 있으면 이 실패
+  유형에 대해서는 더 이상 실제로 필요하지 않을 것입니다.
+
+- **app_server가 첫 데스크탑 배경을 그릴 때 memcpy에서 세그폴트가 날 수
+  있던 문제 -- 서로 다른 원인 두 가지, 둘 다 수정됨.** 시그니처(두 번 다
+  동일): `debug_server: Thread N entered the debugger: Segment
+  violation`, PC가 memcpy 안, `HWInterface::_CopyBackToFront` ->
+  `CopyBackToFront` -> `InvalidateRegion` -> `DrawingEngine::FillRegion`
+  -> `Desktop::_SetBackground` -> `Desktop::Init` ->
+  `AppServer::_CreateDesktop`에서 호출됨.
+
+  **원인 1, `0040-virtio-gpu-follow-host-size`:** `virtio_gpu_init_device()`
+  (`src/add-ons/kernel/drivers/graphics/virtio/virtio_gpu.cpp`)는 "모든
+  모드에 맞도록" 고정 크기(3840x2160, 4K) 프레임버퍼 영역 하나만
+  할당했는데 — `bytes_per_row`/스캔아웃 리소스는 *실제* 요청된
+  디스플레이 모드로 계산되고, `virtio_gpu_set_display_mode()`는 나중에
+  모드가 바뀔 때마다 영역을 다시 할당하지 않고 같은 고정 영역을
+  재사용했습니다. 4K를 넘는 모드는 이 영역을 넘겨썼습니다. Apple Silicon
+  Mac Mini에서 실제 `system_profiler` 해상도인 6720x2836에서
+  결정적으로(매 부팅마다, 간헐적이지 않게) 크래시하는 걸 확인했습니다.
+  `0040`으로 고쳤습니다(`renkuos-apps/renku-retina`에서 가져온 것으로,
+  거기 원래 수정은 5120x2880을 할당하는데 — 이 포트 자신의 QEMU 런처가
+  게스트에게 호스트의 실제 해상도를 그대로 제공하고 6720x2836이 그걸
+  넘어서기 때문에 그것만으로는 부족했습니다; 이 포트에서 추가한 부분은
+  7680x4320을 먼저 시도하고 5120x2880, 3840x2160으로 차례로 떨어집니다).
+  매번 크래시하던 바로 그 6720x2836 해상도로 다시 빌드·부팅해서 수정을
+  확인했습니다.
+
+  **원인 2, qemu-notch dylib의 `-S`/QMP `cont` 재개(`tools/qemu-notch/qemu-notch.m`):**
+  이건 실제 맥북 에어의 실제 네이티브 해상도인 2560x1664에서의 두 번째
+  재현을 설명하지 못했습니다 — 옛 4K 캡보다 훨씬 작아서 원인 1의 수정만
+  으로는 여기에 도움이 안 됐습니다. 같은 해상도에서 통제된 A/B 부팅들로
+  격리했습니다: `--window`(풀스크린 아님, dylib는 로드되지만 풀스크린/
+  `-S` 로직이 한 번도 안 걸림)는 깨끗하게 부팅됐고, dylib를 완전히 끈
+  `--fullscreen`도 깨끗했고, dylib의 EDID/Retina override는 켜둔 채
+  테스트용으로 `-S` hold만 건너뛴 `--fullscreen`도 깨끗했습니다 — 실제,
+  수정 없는 `--fullscreen` 경로(dylib 활성, `-S` hold, `cont` 전송)만
+  크래시했고, 그것도 실제 기기에서 두 번 재현됐습니다. 근본 원인:
+  `EnterOverlay()`가 뷰/창 크기를 바꾸고 `Refresh()`를 부르는데, 이건
+  QEMU 자신의 Cocoa UI 스레드에게 새 크기를 적용하고 virtio-gpu의 EDID
+  보고 지오메트리를 재협상하라고 *요청*만 할 뿐 — 그게 끝나길 기다리지
+  않고 `StartGuest()`가 백그라운드 큐에서 QMP로 `cont`를 보냅니다. 바로
+  그 틈에 실행을 시작한 게스트는 리사이즈가 실제로 적용되기 전에 자신의
+  EDID 조회, 그리고 이어서 `Desktop::Init()`의 첫 페인트에 도달할 수
+  있어서, 바로 밑에서 계속 바뀌고 있는 프레임버퍼 설정과 경쟁하게
+  됩니다. `StartGuest()`가 QMP 소켓을 열기 전에 300ms `usleep`을 넣어
+  고쳤습니다 — QEMU 자신의 (훅이 없는) 리사이즈 경로에 진짜 완료 콜백을
+  연결하는 대신 고정된 지연을 쓴 것인데, 부팅이 이미 걸리는 몇 초나 풀
+  스크린에 아예 도달하지 못했을 때 이미 허용하는 30초 폴백에 비하면
+  무시할 만한 비용입니다. 수정 확인: 실제 크래시 해상도에서, 수정 없는
+  `--fullscreen` 경로 그대로 5번 중 5번 성공했고, 실제 `MacRenkuOS.app`
+  자체도 실제 대상 Mac에서 처음부터 끝까지 다시 띄워서 확인했습니다.
+
+  둘 다 각각 업스트림/이 포트 자신의 툴링 문제입니다(virtio_gpu 쪽은
+  업스트림 Haiku 커널 코드로 올릴 가치가 있고, qemu-notch 쪽은 Haiku
+  코드가 아니라 이 포트 자신의 macOS 쪽 툴링입니다) — 같은 조사 과정에서
+  드러났을 뿐, 위의 packagefs 수정과는 무관합니다.
 
 ## 알려진 한계
 
@@ -315,5 +409,20 @@ HaikuWebKit 자체를 패치하고 `haikuwebkit`/`haikuwebkit_devel` 패키지�
   지원합니다. Haiku에는 virtio-console이 아예 없어서(확인함, 추측
   아님) QEMU를 통한 직접 채널은 애초에 불가능합니다.
 - **R\* 앱**: 부팅 후 호스팅된 저장소(https://pkgman.rainygirl.com/arm64)에서
-  `pkgman`으로 설치합니다. ISO에 미리 들어있지는 않지만, R AppMarket 자체는
-  예외입니다 (0020) -- 나머지 앱을 설치할 GUI가 처음 부팅부터 항상 있도록.
+  `pkgman`으로 설치합니다. ISO에 미리 들어있지는 않지만, 예외가 둘
+  있습니다: R AppMarket 자체(0020) -- 나머지 앱을 설치할 GUI가 처음
+  부팅부터 항상 있도록 -- 그리고 R Retina가 쓰는 app_server/Tracker/
+  Screen/virtio_gpu 패치들(0037-0040)은 R Retina 자신의 `rretina`
+  패키지에 맡기지 않고 이미지 자체에 바로 녹여 넣어서, 올바른 HiDPI
+  스케일이 Installer가 열리기도 전인 첫 라이브 부팅부터 -- 나중에 패키지를
+  설치한 뒤가 아니라 -- 이미 정해집니다.
+- **레티나/HiDPI 감지** (0037-0040): 실제 대상 Mac(13인치 맥북 에어)에서
+  실제 `MacRenkuOS.app` 실행 경로로 확인했습니다 -- `virtio_gpu_get_edid_info()`가
+  패널을 2560x1664에서 29x18cm(≈224dpi)로 읽었고, `Desktop::_AutomaticUIScale()`가
+  이를 2배로 바꾸는데, 그 패널에 정확히 맞는 스케일입니다 -- 크래시 없이
+  정상 동작하는 `sshd`까지 완전히 부팅했고, 이건 위의 `0036`/qemu-notch
+  지연 수정 전에는 크래시했던 바로 그 실제 실행 경로(notch dylib, 풀스크린,
+  `-S`/QMP `cont`)입니다. virtio_gpu 프레임버퍼 오버플로우 수정이 회귀하지
+  않았다는 것도 확인했습니다: 전에는 app_server를 결정적으로 크래시시키던
+  바로 그 실제 `system_profiler` 해상도 6720x2836이 `0040`의 8K 우선
+  할당 캐스케이드로 깨끗하게 부팅됩니다.

@@ -1,0 +1,257 @@
+Subject: [PATCH] virtio_gpu: report the size the host proposes, allow a second open
+
+QEMU proposes the size of its window as the display's preferred size and
+updates it when the window is resized or made full screen. The driver read
+it once, when app_server opened the device, so Haiku kept the boot size.
+
+- VIRTIO_GPU_GET_PREFERRED_SIZE asks the host again (GET_DISPLAY_INFO)
+  without changing anything, and returns that size together with the
+  largest the frame buffer holds. rretina_resize (renkuos-apps/renku-retina's
+  resize/) polls it and switches the screen with BScreen::SetMode().
+- Opening the device set it up from scratch: a second open replaced the
+  frame buffer under app_server. Only the first open does now; later ones
+  share it (and closing them leaves it alone).
+- The frame buffer is allocated for the largest mode it can get contiguous
+  memory for, trying progressively smaller fixed sizes, and
+  set_display_mode refuses a mode it cannot hold instead of overrunning it.
+- A command waited with acquire_sem() and then polled the queue. The
+  semaphore starts at 1 and an interrupt can be missed, so the count
+  drifted from the completions and a wait could block forever on one that
+  had already happened: the update thread stuck on its first command and
+  the screen stayed black (2 of 5 boots on x86_64 with the larger frame
+  buffer). It now polls the queue, sleeping on the semaphore for at most
+  1 ms between polls.
+- The EDID is read again with the preferred size: QEMU derives the display's
+  physical size from its window as well, and a window that went full screen
+  after app_server opened the device left the boot window's size in the
+  EDID (2560x1664 read as 13x8 cm, 516 dpi) and the UI scale at its maximum.
+
+Ported from renkuos-apps/renku-retina (patch 0004), the same project as
+0037-app-server-dpi-ui-scale -- see that patch for why this is baked into
+the image rather than left to a later pkgman install. One change from the
+original: the frame buffer size cascade tries 7680x4320 (8K) before
+5120x2880 (5K) and 3840x2160 (4K). 5K was not big enough on its own: this
+port's own QEMU launcher (run-qemu-renku-arm64.sh) offers the guest the
+*host's* own resolution, and a real macOS system_profiler reading on an
+Apple Silicon Mac Mini came back 6720x2836 -- over 5K, and (before this
+patch's set_display_mode refusal existed at all) a confirmed, deterministic
+app_server crash: an out-of-bounds memcpy in HWInterface::_CopyToFront()
+during the very first desktop paint, reproducing on every single boot at
+that exact resolution. Confirmed fixed by rebuilding with the 8K-first
+cascade and boot-testing at the same 6720x2836 resolution that crashed
+every time before.
+
+diff --git a/headers/private/graphics/virtio/virtio_info.h b/headers/private/graphics/virtio/virtio_info.h
+index 43a53b235b..28e830aae2 100644
+--- a/headers/private/graphics/virtio/virtio_info.h
++++ b/headers/private/graphics/virtio/virtio_info.h
+@@ -37,6 +37,17 @@ enum {
+ 	VIRTIO_GPU_GET_PRIVATE_DATA = B_DEVICE_OP_CODES_END + 1,
+ 	VIRTIO_GPU_GET_DEVICE_NAME,
+ 	VIRTIO_GPU_SET_DISPLAY_MODE,
++	VIRTIO_GPU_GET_PREFERRED_SIZE,
++		// virtio_gpu_preferred_size: the size the host proposes now, e.g.
++		// the size of the host window showing the display
++};
++
++
++struct virtio_gpu_preferred_size {
++	uint32			width;
++	uint32			height;
++	uint32			max_width;		// what the frame buffer can hold
++	uint32			max_height;
+ };
+ 
+ 
+diff --git a/src/add-ons/kernel/drivers/graphics/virtio/virtio_gpu.cpp b/src/add-ons/kernel/drivers/graphics/virtio/virtio_gpu.cpp
+index 51345933eb..4ef6485a94 100644
+--- a/src/add-ons/kernel/drivers/graphics/virtio/virtio_gpu.cpp
++++ b/src/add-ons/kernel/drivers/graphics/virtio/virtio_gpu.cpp
+@@ -53,6 +53,10 @@ typedef struct {
+ 
+ 	area_id					sharedArea;
+ 	virtio_gpu_shared_info* sharedInfo;
++
++	int32					openCount;
++		// app_server's accelerant opens the device first and owns it; later
++		// opens (rretina's resize helper) only share it
+ } virtio_gpu_driver_info;
+ 
+ 
+@@ -141,10 +145,13 @@ virtio_gpu_send_cmd(virtio_gpu_driver_info* info, void *cmd, size_t cmdSize, voi
+ 	if (status != B_OK)
+ 		return status;
+ 
+-	acquire_sem(info->commandDone);
+-
++	// Wait for the device to complete the request. The interrupt only
++	// wakes us early: commandDone starts at 1 and an interrupt can be
++	// missed (the queue masks it while its callback runs), so its count
++	// drifts from the completions and a plain acquire_sem() could wait
++	// forever for one that already happened - the display then stays black.
+ 	while (!info->virtio->queue_dequeue(info->controlQueue, NULL, NULL))
+-		spin(10);
++		acquire_sem_etc(info->commandDone, 1, B_RELATIVE_TIMEOUT, 1000);
+ 
+ 	memcpy(response, (void*)(info->commandBuffer + cmdSize), responseSize);
+ 
+@@ -185,6 +192,32 @@ virtio_gpu_get_display_info(virtio_gpu_driver_info* info)
+ }
+ 
+ 
++/*!	Asks the host for the display size it would like now, without changing
++	anything. QEMU proposes the size of its window, so this follows the
++	window when it is resized or made full screen.
++*/
++static status_t
++virtio_gpu_query_preferred_size(virtio_gpu_driver_info* info, uint32* _width,
++	uint32* _height)
++{
++	struct virtio_gpu_ctrl_hdr hdr = {};
++	struct virtio_gpu_resp_display_info displayInfo = {};
++
++	hdr.type = VIRTIO_GPU_CMD_GET_DISPLAY_INFO;
++
++	virtio_gpu_send_cmd(info, &hdr, sizeof(hdr), &displayInfo,
++		sizeof(displayInfo));
++
++	if (displayInfo.hdr.type != VIRTIO_GPU_RESP_OK_DISPLAY_INFO
++		|| !displayInfo.pmodes[0].enabled)
++		return B_ERROR;
++
++	*_width = displayInfo.pmodes[0].r.width;
++	*_height = displayInfo.pmodes[0].r.height;
++	return B_OK;
++}
++
++
+ status_t
+ virtio_gpu_get_edids(virtio_gpu_driver_info* info, int scanout)
+ {
+@@ -411,6 +444,14 @@ virtio_gpu_set_display_mode(virtio_gpu_driver_info* info, display_mode *mode)
+ {
+ 	CALLED();
+ 
++	// the frame buffer was allocated once, for the largest mode
++	if (mode->virtual_width == 0 || mode->virtual_height == 0
++		|| mode->virtual_width > info->framebufferWidth
++		|| mode->virtual_height > info->framebufferHeight
++		|| (size_t)mode->virtual_width * mode->virtual_height * 4
++			> info->framebufferSize)
++		return B_BAD_VALUE;
++
+ 	int newResourceId = info->displayResourceId + 1;
+ 
+ 	// create framebuffer area
+@@ -566,6 +607,14 @@ virtio_gpu_open(void* _info, const char* path, int openMode, void** _cookie)
+ 	if (handle == NULL)
+ 		return B_NO_MEMORY;
+ 
++	// Opening set the whole device up from scratch - a second open would
++	// have replaced the frame buffer under the first. Only the first does.
++	if (atomic_add(&info->openCount, 1) > 0) {
++		handle->info = info;
++		*_cookie = handle;
++		return B_OK;
++	}
++
+ 	info->commandDone = create_sem(1, "virtio_gpu_command");
+ 	if (info->commandDone < B_OK)
+ 		goto error;
+@@ -587,15 +636,26 @@ virtio_gpu_open(void* _info, const char* path, int openMode, void** _cookie)
+ 	if ((info->features & VIRTIO_GPU_F_EDID) != 0)
+ 		virtio_gpu_get_edids(info, 0);
+ 
+-	// so we can fit every mode
+-	info->framebufferWidth = 3840;
+-	info->framebufferHeight = 2160;
+-
+-	// create framebuffer area
+-	info->framebufferSize = 4 * info->framebufferWidth * info->framebufferHeight;
+-	info->framebufferArea = create_area("virtio_gpu framebuffer", (void**)&info->framebuffer,
+-		B_ANY_KERNEL_ADDRESS, info->framebufferSize,
+-		B_FULL_LOCK | B_CONTIGUOUS, B_READ_AREA | B_WRITE_AREA);
++	// so we can fit every mode: 8K first (a full-screen QEMU window on a
++	// large Retina display reporting its own, unscaled panel size, which
++	// can exceed 5K -- confirmed with macOS system_profiler reporting
++	// 6720x2836 on an Apple Silicon Mac Mini), falling back to 5K and then
++	// 4K as that much contiguous memory becomes harder to come by
++	static const struct { uint32 width, height; } kFramebufferSizes[] = {
++		{ 7680, 4320 }, { 5120, 2880 }, { 3840, 2160 }
++	};
++	for (size_t i = 0; i < B_COUNT_OF(kFramebufferSizes); i++) {
++		info->framebufferWidth = kFramebufferSizes[i].width;
++		info->framebufferHeight = kFramebufferSizes[i].height;
++		info->framebufferSize
++			= 4 * info->framebufferWidth * info->framebufferHeight;
++		info->framebufferArea = create_area("virtio_gpu framebuffer",
++			(void**)&info->framebuffer, B_ANY_KERNEL_ADDRESS,
++			info->framebufferSize, B_FULL_LOCK | B_CONTIGUOUS,
++			B_READ_AREA | B_WRITE_AREA);
++		if (info->framebufferArea >= B_OK)
++			break;
++	}
+ 	if (info->framebufferArea < B_OK) {
+ 		status = info->framebufferArea;
+ 		goto error;
+@@ -638,6 +698,7 @@ virtio_gpu_open(void* _info, const char* path, int openMode, void** _cookie)
+ 	return B_OK;
+ 
+ error:
++	atomic_add(&info->openCount, -1);
+ 	delete_area(info->framebufferArea);
+ 	info->framebufferArea = -1;
+ 	delete_sem(info->commandDone);
+@@ -654,6 +715,8 @@ virtio_gpu_close(void* cookie)
+ 	CALLED();
+ 
+ 	virtio_gpu_driver_info* info = handle->info;
++	if (atomic_get(&info->openCount) > 1)
++		return B_OK;
+ 	info->updateThreadRunning = false;
+ 	delete_sem(info->commandDone);
+ 	info->commandDone  = -1;
+@@ -669,6 +732,10 @@ virtio_gpu_free(void* cookie)
+ 	virtio_gpu_handle* handle = (virtio_gpu_handle*)cookie;
+ 
+ 	virtio_gpu_driver_info* info = handle->info;
++	if (atomic_add(&info->openCount, -1) > 1) {
++		free(handle);
++		return B_OK;
++	}
+ 	int32 result;
+ 	wait_for_thread(info->updateThread, &result);
+ 	info->updateThread = -1;
+@@ -740,6 +807,32 @@ virtio_gpu_ioctl(void* cookie, uint32 op, void* buffer, size_t length)
+ 
+ 			return virtio_gpu_set_display_mode(info, &mode);
+ 		}
++
++		case VIRTIO_GPU_GET_PREFERRED_SIZE:
++		{
++			if (length != sizeof(virtio_gpu_preferred_size))
++				return B_BAD_VALUE;
++
++			virtio_gpu_preferred_size size = {};
++			{
++				MutexLocker commandLocker(&info->commandLock);
++				status_t status = virtio_gpu_query_preferred_size(info,
++					&size.width, &size.height);
++				if (status != B_OK)
++					return status;
++				// The host's EDID follows its window too (QEMU derives the
++				// physical size from it), and app_server reads the size when
++				// the mode changes - which happens after this call. Read it
++				// again, or a window that went full screen after the device
++				// was opened leaves the boot window's size, and UI scale.
++				if ((info->features & VIRTIO_GPU_F_EDID) != 0)
++					virtio_gpu_get_edids(info, 0);
++			}
++			size.max_width = info->framebufferWidth;
++			size.max_height = info->framebufferHeight;
++			return user_memcpy(buffer, &size, sizeof(size));
++		}
++
+ 		default:
+ 			ERROR("ioctl: unknown message %" B_PRIx32 "\n", op);
+ 			break;
