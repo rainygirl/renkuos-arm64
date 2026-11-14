@@ -6,7 +6,7 @@ R Chromium there, once a real install has network) and a live medium that
 ships it already on the image, for running straight off the medium with
 no install and no network wait -- what MacRenkuOS.app boots.
 
-Adds `rchromium-154.0.8036.0-30` to the arm64 repository list, same as
+Adds `rchromium-154.0.8036.0-31` to the arm64 repository list, same as
 `rappmarket-1.0.0-4` right above it, but only pulls it onto the image
 (`AddHaikuImageSystemPackages rchromium`) when the build sets
 `RENKU_LIVE_BUILD=1` -- a jam variable the build script now passes with
@@ -62,7 +62,7 @@ index d08dd60c..fb5ba78b 100644
 +	# R Chromium -- published in RENKU Apps, re-vendored to "Haiku Project"
 +	# at build time (see build-renku-arm64-iso.sh); only pulled onto the
 +	# image when RENKU_LIVE_BUILD=1 (see DefaultBuildProfiles).
-+	rchromium-154.0.8036.0-30
++	rchromium-154.0.8036.0-31
  	# The image translators, prebuilt against haikuwebkit's libjpeg-turbo,
  	# libpng and libwebp and libavif1.0's libavif (see DefaultBuildProfiles).
  	renku_imagetranslators-1.0.0-1

@@ -351,7 +351,7 @@ log "Staging R Chromium for the live image (0042)"
 	PACKAGE_TOOL="$(find "$GEN/objects" -type f -name package -path '*tools/package/package' 2>/dev/null | head -1)"
 	[ -n "$PACKAGE_TOOL" ] || die "host package tool not found after building <build>package"
 
-	RCHROMIUM_HPKG="rchromium-154.0.8036.0-30-arm64.hpkg"
+	RCHROMIUM_HPKG="rchromium-154.0.8036.0-31-arm64.hpkg"
 	curl -fL -o "$WORK_DIR/$RCHROMIUM_HPKG.orig" \
 		"https://pkgman.rainygirl.com/arm64/packages/$RCHROMIUM_HPKG"
 
