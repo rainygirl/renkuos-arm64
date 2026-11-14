@@ -61,7 +61,7 @@ Launching x-vnd.haiku-media_server failed: No such file or directory
 합니다. 부팅도 되고 거기서 설치도 되는 매체를 내놓는 쪽은 이 패치입니다.
 
 
-### 오디오 너머: 0005-0044
+### 오디오 너머: 0005-0045
 
 설치된 arm64 시스템에서 모든 앱을 시험하며 드러난 문제를, 이미지 안에서
 우회하지 않고 이미지 자체에서 고친 것들입니다.
@@ -105,6 +105,7 @@ Launching x-vnd.haiku-media_server failed: No such file or directory
 | `0042-live-image-rchromium` | 위의 USB 설치 매체는 여전히 네트워크가 있는 실제 부팅이 한 번 있어야 R Chromium이 생깁니다. [MacRenkuOS.app](../macapp/)이 실제로 내려받아 설치에 쓰는 라이브 매체는 이미지에 바로 올려서 포함시킵니다 — 같은 `build-renku-arm64-iso.sh` 트리를 다른 방식으로 한 번 더 빌드하는 것뿐입니다: `RENKU_LIVE_BUILD=1`이면 `rchromium-154.0.8036.0-28`을 `AddHaikuImageSystemPackages`에 추가하는데, `DefaultBuildProfiles`에서 이 jam 변수로 게이트해 뒀기 때문에 일반 설치용 빌드는 이걸 요청하지 않습니다. 그 전에 재벤더링이 필요했습니다: `package_repo`는 이 로컬 HaikuPorts-info 레포지토리의 나머지와 vendor가 다른 패키지를 거부하는데, 이는 `0012`의 curl/wget과 `0020`의 rappmarket이 이미 부딛힌 것과 똑같은 제약이고, 거기서는 각자의 레시피에서 vendor를 "Haiku Project"로 강제해서 다시 빌드하는 식으로 피해갔습니다 — 하지만 몇 시간짜리 네이티브 Chromium 빌드로 똑같이 하는 건 현실적이지 않습니다. 대신 `build-renku-arm64-iso.sh`는 이미 빌드된 hpkg를 재벤더링합니다: 호스트용 `package` 툴(`<build>package`, jam이 다른 호스트용 빌드 툴을 만드는 것과 같은 방식)을 빌드하고, 내려받은 hpkg를 추출해서, extract가 써 주는 `.PackageInfo`의 vendor 줄만 고친 뒤, 그 수정된 사본으로 다시 패키징합니다 — 바이너리는 그대로고 메타데이터만 다릅니다. |
 | `0043-live-image-no-installer` | 라이브 매체(`RENKU_LIVE_BUILD=1`)는 매체에서 바로 실행되는 게 전제라서 — 거기선 설치할 게 없습니다. 같은 jam 변수로 게이트해서 `Installer`를 `SYSTEM_APPS`와 `DESKBAR_APPLICATIONS` 양쪽에서 걸러냅니다. `data/launch/user`의 `create-installer-link` job(읽기전용/라이브 부팅에서 데스크탑에 Installer 바로가기를 만드는 job)은 이미 `file_exists /boot/system/apps/Installer`로 게이트되어 있어서, 바이너리를 빼는 것만으로도 그 바로가기가 안 생기게 하는 데 충분합니다 — 거기는 따로 손댈 게 없습니다. |
 | `0044-live-image-skip-firstboot` | `0043`으로도 FirstBootPrompt의 Install/Try it out 화면 자체는 매번 라이브 부팅 때마다 그대로 떴습니다(`data/launch/user`의 `run` job은 매체가 읽기전용인지로 이 화면을 띄울지 정하는데, 라이브 매체는 항상 읽기전용입니다) — 바이너리가 사라졌으니 "Install"은 눌러도 실패하는 죽은 버튼이 되고요(`FirstBootPromptWindow`는 Installer가 실제로 있는지 확인하지 않고 그 버튼을 무조건 그립니다). `run`의 조건은 `/system/bin/FirstBootPrompt`가 있을 때만 `first_boot`로 들어가므로, `RENKU_LIVE_BUILD=1`일 때 `SYSTEM_BIN`에서 그걸 걸러내는 것만으로 — `0043`과 같은 방식 — `data/launch/user`를 따로 안 고쳐도 라이브 매체가 바로 데스크탑으로 부팅되게 할 수 있습니다. |
+| `0045-boot-splash-logo` | `app_server`가 뜨기 전까지는 QEMU 창에 보여줄 게 없습니다 — EDK2/EFI 부트로더가 virtio-gpu에 아직 아무것도 그리지 않은 상태라, 그동안은 cocoa 디스플레이 자신의 "Display output is not active" 플레이스홀더만 보입니다. RenkuOS/Source 자신의 부트로더는 이미 그 공백 구간에 로고를 그리게 돼 있지만(`video_display_splash()`, `default` 빌드에 이미 연결돼 있음) 372x96 이미지가 비어있는 채로 컴파일돼 있었습니다 — 상표 미포함 빌드에서 Haiku 로고를 뺀 뒤 RenkuOS 것으로 대체하지 않았기 때문입니다. [`renkuos-logopatch`](../renkuos-logopatch/)에서 그대로 가져왔습니다(같은 고정 커밋 기준으로 생성됨): `headers/private/kernel/boot/images.h`의 고대비 RenkuOS 워드마크만 바꾸고 나머지는 그대로입니다. arm64 전용 수정은 아닙니다 — 업스트림에서는 어느 아키텍처든 이렇게 비어있습니다 — 하지만 이 이미지의 부팅 과정 중 RenkuOS 브랜딩이 전혀 안 보이는 유일한 순간이라 포함해 둘 가치가 있습니다. |
 
 ## 어떤 패치가 RenkuOS/Source PR 후보인가
 
